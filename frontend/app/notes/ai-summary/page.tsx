@@ -1,0 +1,318 @@
+"use client";
+
+import { useRef } from "react";
+import { motion, useScroll, useTransform } from "motion/react";
+import { ArrowLeft, Share2, Lock, Unlock, ArrowRight } from "lucide-react";
+import Link from "next/link";
+import { AnimatedOrb } from "@/components/animated-orb";
+
+export default function AISummaryNotePage() {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const unlockRef = useRef<HTMLDivElement>(null);
+
+  // Scroll-based unlock animation
+  const { scrollYProgress } = useScroll({
+    target: unlockRef,
+    offset: ["start end", "center center"],
+  });
+
+  const lockRotation = useTransform(scrollYProgress, [0, 0.5, 1], [0, -15, -45]);
+  const lockY = useTransform(scrollYProgress, [0, 0.5, 1], [0, -2, -8]);
+  const lockOpacity = useTransform(scrollYProgress, [0.6, 1], [1, 0]);
+  const unlockOpacity = useTransform(scrollYProgress, [0.6, 1], [0, 1]);
+  const glowIntensity = useTransform(scrollYProgress, [0.5, 1], [0, 1]);
+
+  const stats = [
+    { label: "days consistent", value: "12/17" },
+    { label: "total", value: "−1.8kg" },
+    { label: "20 min walks", value: "11/12" },
+  ];
+
+  return (
+    <div ref={containerRef} className="min-h-screen bg-background noise-bg">
+      {/* Background effects */}
+      <div className="fixed inset-0 pointer-events-none">
+        <div className="absolute top-1/4 left-1/2 -translate-x-1/2 w-[500px] h-[500px] bg-[#F5C518]/[0.03] rounded-full blur-[120px]" />
+        <div className="absolute bottom-1/4 left-1/3 w-[400px] h-[400px] bg-[#00D4FF]/[0.02] rounded-full blur-[100px]" />
+      </div>
+
+      {/* Top Bar */}
+      <motion.header
+        initial={{ opacity: 0, y: -20 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ duration: 0.5 }}
+        className="fixed top-0 left-0 right-0 z-50 px-4 sm:px-6 py-4 flex items-center justify-between"
+        style={{
+          background: "linear-gradient(180deg, rgba(8,11,20,0.95) 0%, rgba(8,11,20,0) 100%)",
+        }}
+      >
+        <Link
+          href="/notes"
+          className="p-2 -ml-2 rounded-xl text-[rgba(255,255,255,0.5)] hover:text-white hover:bg-[rgba(255,255,255,0.06)] transition-all"
+        >
+          <ArrowLeft className="w-5 h-5" />
+        </Link>
+
+        <span className="font-mono text-sm text-[#00D4FF]">AI Note</span>
+
+        <button className="p-2 -mr-2 rounded-xl text-[rgba(255,255,255,0.5)] hover:text-[#F5C518] hover:bg-[rgba(255,255,255,0.06)] transition-all">
+          <Share2 className="w-5 h-5" />
+        </button>
+      </motion.header>
+
+      {/* Main Content */}
+      <main className="relative pt-20 pb-32 px-4 sm:px-6 max-w-2xl mx-auto">
+        {/* Hero Card */}
+        <motion.div
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.6, delay: 0.1 }}
+          className="relative p-5 sm:p-6 rounded-2xl overflow-hidden"
+          style={{
+            background: "linear-gradient(135deg, rgba(20, 25, 35, 0.8) 0%, rgba(15, 18, 28, 0.9) 100%)",
+            border: "2px solid rgba(245, 197, 24, 0.3)",
+            boxShadow: "0 8px 32px rgba(245, 197, 24, 0.1), inset 0 1px 0 rgba(255,255,255,0.05)",
+          }}
+        >
+          {/* Progress Ring - Top Right */}
+          <div className="absolute top-4 right-4 sm:top-5 sm:right-5">
+            <svg width="48" height="48" viewBox="0 0 48 48" className="transform -rotate-90">
+              {/* Background ring */}
+              <circle
+                cx="24"
+                cy="24"
+                r="20"
+                stroke="rgba(255,255,255,0.1)"
+                strokeWidth="4"
+                fill="none"
+              />
+              {/* Progress ring - animated */}
+              <motion.circle
+                cx="24"
+                cy="24"
+                r="20"
+                stroke="#F5C518"
+                strokeWidth="4"
+                fill="none"
+                strokeLinecap="round"
+                initial={{ pathLength: 0 }}
+                animate={{ pathLength: 0.66 }}
+                transition={{ duration: 1.5, delay: 0.5, ease: "easeOut" }}
+                style={{
+                  strokeDasharray: "125.6",
+                  filter: "drop-shadow(0 0 6px rgba(245, 197, 24, 0.5))",
+                }}
+              />
+            </svg>
+            <span className="absolute inset-0 flex items-center justify-center font-mono text-xs text-[#F5C518]">
+              2/3
+            </span>
+          </div>
+
+          <div className="flex items-start gap-4 pr-14">
+            <AnimatedOrb size={56} />
+            <div className="flex-1 min-w-0">
+              <h1 className="font-sans font-bold text-lg sm:text-xl text-white leading-tight">
+                Milestone Reached — Build the Deficit
+              </h1>
+              <p className="font-mono text-xs sm:text-sm text-[#00D4FF] mt-2">
+                Generated by your coach · 19 Apr 2026
+              </p>
+            </div>
+          </div>
+        </motion.div>
+
+        {/* Pull Quote */}
+        <motion.div
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.6, delay: 0.2 }}
+          className="mt-8 pl-5 border-l-4 border-[#F5C518]"
+          style={{
+            boxShadow: "-4px 0 16px rgba(245, 197, 24, 0.15)",
+          }}
+        >
+          <p className="font-mono text-base sm:text-lg text-white italic leading-relaxed">
+            &ldquo;You&apos;ve hit your first real milestone. 12 consistent days out of 17. That&apos;s not luck — that&apos;s a system working.&rdquo;
+          </p>
+        </motion.div>
+
+        {/* What you achieved */}
+        <motion.section
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.6, delay: 0.3 }}
+          className="mt-10"
+        >
+          <h2 className="font-sans font-bold text-lg text-white mb-4">
+            What you achieved
+          </h2>
+          <div className="grid grid-cols-3 gap-3">
+            {stats.map((stat, index) => (
+              <motion.div
+                key={stat.label}
+                initial={{ opacity: 0, scale: 0.9 }}
+                animate={{ opacity: 1, scale: 1 }}
+                transition={{ duration: 0.4, delay: 0.4 + index * 0.1 }}
+                className="p-4 rounded-xl text-center"
+                style={{
+                  background: "linear-gradient(135deg, rgba(20, 25, 35, 0.7) 0%, rgba(15, 18, 28, 0.8) 100%)",
+                  border: "1px solid rgba(255, 255, 255, 0.06)",
+                  boxShadow: "inset 0 1px 0 rgba(255,255,255,0.03)",
+                }}
+              >
+                <p className="font-mono text-lg sm:text-xl font-bold text-[#F5C518]">
+                  {stat.value}
+                </p>
+                <p className="font-mono text-[10px] sm:text-xs text-[rgba(255,255,255,0.5)] mt-1">
+                  {stat.label}
+                </p>
+              </motion.div>
+            ))}
+          </div>
+        </motion.section>
+
+        {/* What the data says */}
+        <motion.section
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.6, delay: 0.5 }}
+          className="mt-10"
+        >
+          <h2 className="font-sans font-bold text-lg text-white mb-4">
+            What the data says
+          </h2>
+          <p className="font-mono text-sm text-[rgba(255,255,255,0.7)] leading-relaxed">
+            Your weight trend shows a steady 0.4kg average loss per week — exactly in the sustainable range. 
+            Morning weigh-ins are most consistent on weekdays, with slight variance on weekends. 
+            The 20-minute walks correlate strongly with better sleep scores the following night, which suggests we should protect this habit as you move into Phase 2.
+          </p>
+        </motion.section>
+
+        {/* Your next milestone */}
+        <motion.section
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.6, delay: 0.6 }}
+          className="mt-10"
+        >
+          <h2 className="font-sans font-bold text-lg text-white mb-4">
+            Your next milestone
+          </h2>
+
+          {/* Milestone 3 Preview Card with Unlock Animation */}
+          <div ref={unlockRef} className="relative">
+            <motion.div
+              className="relative p-5 rounded-xl overflow-hidden"
+              style={{
+                background: "linear-gradient(135deg, rgba(20, 25, 35, 0.6) 0%, rgba(15, 18, 28, 0.7) 100%)",
+                border: "1px solid rgba(245, 197, 24, 0.15)",
+              }}
+            >
+              {/* Animated glow on unlock */}
+              <motion.div
+                className="absolute inset-0 rounded-xl pointer-events-none"
+                style={{
+                  opacity: glowIntensity,
+                  boxShadow: "0 0 40px rgba(245, 197, 24, 0.3), inset 0 0 20px rgba(245, 197, 24, 0.05)",
+                }}
+              />
+
+              <div className="flex items-center gap-4">
+                {/* Lock Icon with Animation */}
+                <div className="relative w-12 h-12 flex-shrink-0">
+                  {/* Locked state */}
+                  <motion.div
+                    className="absolute inset-0 flex items-center justify-center"
+                    style={{
+                      opacity: lockOpacity,
+                      rotate: lockRotation,
+                      y: lockY,
+                    }}
+                  >
+                    <div
+                      className="w-10 h-10 rounded-full flex items-center justify-center"
+                      style={{
+                        background: "linear-gradient(135deg, rgba(245, 197, 24, 0.15) 0%, rgba(245, 197, 24, 0.05) 100%)",
+                        border: "1px solid rgba(245, 197, 24, 0.3)",
+                      }}
+                    >
+                      <Lock className="w-5 h-5 text-[#F5C518]" />
+                    </div>
+                  </motion.div>
+
+                  {/* Unlocked state */}
+                  <motion.div
+                    className="absolute inset-0 flex items-center justify-center"
+                    style={{ opacity: unlockOpacity }}
+                  >
+                    <motion.div
+                      className="w-10 h-10 rounded-full flex items-center justify-center"
+                      style={{
+                        background: "linear-gradient(135deg, rgba(245, 197, 24, 0.25) 0%, rgba(245, 197, 24, 0.1) 100%)",
+                        border: "1px solid rgba(245, 197, 24, 0.5)",
+                        boxShadow: "0 0 20px rgba(245, 197, 24, 0.3)",
+                      }}
+                      animate={{
+                        scale: [1, 1.1, 1],
+                      }}
+                      transition={{
+                        duration: 1.5,
+                        repeat: Infinity,
+                        ease: "easeInOut",
+                      }}
+                    >
+                      <Unlock className="w-5 h-5 text-[#F5C518]" />
+                    </motion.div>
+                  </motion.div>
+                </div>
+
+                <div className="flex-1 min-w-0">
+                  <p className="font-mono text-[10px] text-[#00D4FF] uppercase tracking-wider">
+                    Milestone 3
+                  </p>
+                  <h3 className="font-sans font-semibold text-white mt-1">
+                    Automate the Routine
+                  </h3>
+                  <p className="font-mono text-xs text-[rgba(255,255,255,0.5)] mt-1">
+                    Turn habits into autopilot · 7 tasks
+                  </p>
+                </div>
+              </div>
+
+              {/* Progress preview */}
+              <div className="mt-4 h-1.5 rounded-full bg-[rgba(255,255,255,0.06)] overflow-hidden">
+                <motion.div
+                  className="h-full rounded-full bg-[rgba(245,197,24,0.3)]"
+                  initial={{ width: "0%" }}
+                  style={{
+                    width: useTransform(scrollYProgress, [0.5, 1], ["0%", "10%"]),
+                  }}
+                />
+              </div>
+            </motion.div>
+          </div>
+        </motion.section>
+
+        {/* Bottom CTA */}
+        <motion.div
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.6, delay: 0.7 }}
+          className="mt-12"
+        >
+          <Link href="/path">
+            <motion.button
+              whileHover={{ scale: 1.02 }}
+              whileTap={{ scale: 0.98 }}
+              className="w-full flex items-center justify-center gap-3 px-8 py-4 rounded-xl bg-gradient-to-r from-[#F5C518] to-[#E5B516] text-[#080B14] font-sans font-bold text-base shadow-[0_4px_24px_rgba(245,197,24,0.3)] pulse-glow"
+            >
+              Continue to Phase 2
+              <ArrowRight className="w-5 h-5" />
+            </motion.button>
+          </Link>
+        </motion.div>
+      </main>
+    </div>
+  );
+}
