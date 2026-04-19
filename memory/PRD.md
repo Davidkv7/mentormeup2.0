@@ -2,85 +2,148 @@
 
 ## Original Problem Statement
 > "can you pull the files from github repository mentormeup2.0?"
-
-User provided a private GitHub repo (`https://github.com/Davidkv7/mentormeup2.0`) that contained the project as a zipped archive (`b_KqHAyaNywDu.zip`). Goal: clone/import the project into Emergent workspace and set it up so the user can continue building features.
+> → Continued with: "setting up the coach is the most important part of the whole app because it must be connected to every page and knowing every step the user does, also making changes to calendar, goals, paths, notes, guiding them through each step and making sure the user meets their goals and achieves their goals."
 
 ## Product Overview
-**MentorMeUp** — an AI-powered personal mentorship / goal-coaching web app.
-Tagline: *"Any person. Any goal. One AI that gets you there."*
+**MentorMeUp** — an AI-powered personal goal-coaching web app. The AI Coach
+is the product: present on every page, aware of the user's goals / tasks /
+activity, and actively guiding the user toward completion. Tagline:
+*"Any person. Any goal. One AI that gets you there."*
 
-## Tech Stack (detected from imported codebase)
-- **Framework**: Next.js 16.2.0 (App Router)
-- **Language**: TypeScript 5.7
-- **UI**: React 19, Tailwind CSS v4 (`@tailwindcss/postcss`), shadcn/ui (Radix primitives), lucide-react icons
-- **Animation**: `motion` (v12, successor to framer-motion) — imported via `motion/react`
-- **Forms/Validation**: react-hook-form + zod
-- **Charts**: recharts
-- **Fonts**: Syne (display) + JetBrains Mono (mono)
-- **No backend yet** — all state lives in React contexts (localStorage persisted)
+## Tech Stack
+### Frontend
+- Next.js 16.2 (App Router, **webpack** dev bundler, not Turbopack — see note below)
+- React 19 · TypeScript 5.7 · Tailwind v4 · shadcn/ui · motion (v12) via `motion/react`
+- Fonts: Syne (display) + JetBrains Mono (mono)
+- State: React Context + direct API calls (no Redux)
+
+### Backend
+- FastAPI 0.115 on port 8001, all routes prefixed `/api`
+- MongoDB (motor async driver), DB name `mentormeup_db`
+- Auth: Emergent-managed Google OAuth → httpOnly session cookie (7-day expiry)
+- LLM: **Claude Sonnet 4.6** via `emergentintegrations.llm.chat.LlmChat`
+  using the Emergent Universal LLM Key
+
+## Architecture
+```
+Next.js (port 3000)
+├── /login                       — Google sign-in card
+├── /                             — goal input / home
+├── /intake, /path, /goals, /daily, /calendar, /coach, /notes, /health, /settings
+└── CoachWidget (floating orb)    — globally mounted, always accessible
+
+FastAPI (port 8001)
+├── /api/health
+├── /api/auth/{session, me, logout}
+├── /api/goals (GET, POST)        ├── /api/goals/{id} (PATCH, DELETE)
+├── /api/goals/{gid}/tasks/{tid}/toggle
+├── /api/activity (POST)          ├── /api/activity/recent (GET)
+├── /api/coach/chat (POST)        └── /api/coach/history (GET)
+
+MongoDB collections
+users, user_sessions, goals, chat_messages, activity_events
+```
+
+### Key design choices
+- **Activity log first.** Every meaningful user action (`goal.created`,
+  `task.completed`, etc.) is logged into `activity_events`, which the coach
+  reads as context on every turn.
+- **System prompt is rebuilt per turn** with live goal state + last 10
+  activity events, so Claude always has a fresh, accurate picture.
+- **Sessions via httpOnly cookies** with `Bearer` header as fallback — the
+  fallback makes curl / Playwright / test-agent integration painless.
 
 ## Routes / Pages Present
-- `/` — Landing (goal entry)
+- `/` — Landing (goal entry, protected)
+- `/login` — Google sign-in (public)
 - `/intake` — New goal intake flow
 - `/path` — Learning path
 - `/daily` — Daily view
 - `/goals` — Goals list
 - `/calendar` — Weekly calendar
-- `/coach` — AI coach chat
+- `/coach` — Full-page AI coach chat (in addition to global widget)
 - `/notes`, `/notes/new`, `/notes/ai-summary`
 - `/health`, `/health/connect`
 - `/settings`
 
-## What's Been Implemented (Jan 2026 — import session)
+## What's Been Implemented
+
+### Session 1 — Import (Jan/Apr 2026)
 - Pulled private GitHub repo via Emergent's "Pull from GitHub" feature.
 - Extracted `b_KqHAyaNywDu.zip` into `/app/frontend/`.
 - Switched dependency manager from pnpm to yarn (per Emergent standard).
-- Installed all dependencies via `yarn install`.
-- Wired `yarn start` (used by supervisor) to `next dev --webpack -H 0.0.0.0 -p 3000`.
-- Added `allowedDevOrigins` to `next.config.mjs` so the preview domain can access dev HMR.
-- **Fixed framer-motion stuck `opacity: 0` bug**:
-  - Root cause: framer-motion 12 stable + React 19 + Turbopack dev is a known-broken combination — `initial` state never transitions to `animate`.
-  - Fix 1: Swapped import path from `"framer-motion"` → `"motion/react"` across all 32 `.tsx` files, and installed `motion@latest`.
-  - Fix 2: Switched Next.js dev bundler from Turbopack (default in v16) to Webpack via `--webpack` flag.
-- App verified running end-to-end: landing page animates in correctly, logo/tagline/input/CTA/goal chips all visible.
+- Wired `yarn start` → `next dev --webpack -H 0.0.0.0 -p 3000`.
+- Added preview domain to `allowedDevOrigins` in `next.config.mjs`.
+- **Fixed framer-motion stuck `opacity: 0`** (known framer-motion 12 + React 19
+  + Turbopack issue) by (a) swapping imports `"framer-motion"` → `"motion/react"`
+  across 32 files and installing `motion@latest`, (b) switching bundler to webpack.
 
-### Code-Review Fixes (Jan 2026 — session 2)
-Applied the Critical + safer Important items from the `mentor-hub-141` review:
-- **Security — removed `dangerouslySetInnerHTML`** in `app/layout.tsx`. Theme-init script moved to static `public/theme-init.js` and loaded via `<script src="/theme-init.js">` (still runs pre-hydration, no XSS surface).
-- **Hook dependency bugs**:
-  - `contexts/goals-context.tsx`: rewrote all callbacks to use functional `setState` updaters so closures can't go stale; wrapped the context value in `useMemo`; switched silent catch for localStorage parse; memoized `activeGoal`.
-  - `contexts/theme-context.tsx`: wrapped `toggleTheme`/`setTheme` in `useCallback`, `useMemo`-ed context value, extracted `applyThemeToDocument` helper.
-  - `hooks/use-toast.ts`: corrected subscribe effect's dep array from `[state]` → `[]` (was re-subscribing on every state change).
-  - `components/calendar/weekly-view.tsx`: wrapped `currentTimeTop` in `useMemo` so the scroll effect only re-runs when its inputs change.
-- **Array-index keys replaced with stable IDs**:
-  - `app/notes/page.tsx`: `${selectedNote.id}-block-${index}-${block.type}` key on content blocks.
-  - `app/health/page.tsx`: tooltip `payload.map` now keys on `entry.dataKey ?? entry.name`.
-- **Cleanliness**:
-  - Removed `console.log("Saving note:"…)` in `app/notes/new/page.tsx`.
-  - Removed unused `Heart`, `TrendingUp` imports from `app/health/page.tsx`.
-- Verified: `/`, `/notes`, `/health` all render with zero runtime errors after fixes.
+### Session 2 — Code-Review Fixes
+- Replaced `dangerouslySetInnerHTML` in `app/layout.tsx` with an external
+  `/public/theme-init.js` script to kill the XSS surface.
+- Rewrote `contexts/goals-context.tsx` with functional `setState` updaters to
+  eliminate stale-closure bugs; `useMemo`-wrapped context value; silent
+  corrupt-localStorage recovery.
+- Fixed `contexts/theme-context.tsx` with `useCallback` + `useMemo`.
+- Fixed `hooks/use-toast.ts:174` dep array from `[state]` → `[]`.
+- `useMemo`-wrapped `currentTimeTop` in `components/calendar/weekly-view.tsx`.
+- Replaced array-index keys in `app/notes/page.tsx` and `app/health/page.tsx`.
+- Removed lingering `console.log` + unused `Heart`/`TrendingUp` imports.
 
-## Architecture Notes / Deviations from Standard Emergent Template
-- The default `/app/backend` (FastAPI) and MongoDB are **not used** by this project — the supervisor's `backend` program may log "No such file" style errors; that's expected since the imported app is frontend-only for now.
-- Supervisor runs `yarn start` from `/app/frontend`, which we remapped to `next dev --webpack`.
+### Session 3 — AI Coach + Auth + Backend (THIS SESSION)
+- **Built `/app/backend/` from scratch**: FastAPI + MongoDB + Emergent
+  integrations. All `/api` routes listed above, full auth middleware, activity
+  logging, context-aware chat.
+- **Integrated Emergent Google OAuth** end-to-end:
+  - `/login` page with Google CTA.
+  - `OAuthCallbackHandler` detects `#session_id=…` synchronously during render
+    (beats race with `/api/auth/me`) and exchanges via `POST /api/auth/session`.
+  - httpOnly cookie `session_token` with `secure + samesite=none`.
+  - `AuthGate` component redirects all non-public routes to `/login`.
+- **Integrated Claude Sonnet 4.6** via the Emergent Universal LLM Key using
+  `emergentintegrations.llm.chat.LlmChat`. System prompt is rebuilt per turn
+  with user name + active goals + last 10 activity events.
+- **Migrated `goals-context`** from localStorage to API (keeps the same
+  external interface so existing pages keep working; now `addGoal` etc. are
+  `async`).
+- **Built `CoachProvider` + `CoachWidget`** — a floating gold orb mounted
+  globally in the root layout, opens a right-side drawer with full chat UI,
+  shows existing history, sends messages, optimistic user bubble, typing dots
+  while waiting, persists both turns.
+- **Testing**: 19 backend + 6 frontend E2E tests all pass (iteration_1.json).
+  Coach returns real Claude replies within ~4–6s referencing user's actual
+  goals and name.
 
-## Prioritized Backlog (P0/P1/P2)
-### P0 — Core functionality
-- [ ] Wire up a real backend (FastAPI + MongoDB) for goals, notes, calendar events, coach chat, and user profile — currently all data is in React context / localStorage.
-- [ ] Integrate an AI provider for the `/coach` conversational mentor and the `/notes/ai-summary` route (recommend Emergent Universal LLM Key + `emergentintegrations`).
-- [ ] Add authentication (JWT or Emergent-managed Google OAuth).
+## Prioritized Backlog
 
-### P1 — Product completeness
-- [ ] Persist user goals across sessions (DB).
-- [ ] Implement Intake flow → generates a personalized path via LLM.
-- [ ] Implement Daily check-in + mood tracking persistence.
-- [ ] Health integrations (Google Fit / Apple Health) — currently `/health/connect` is a stub.
+### P0 — coach upgrades (next session)
+- [ ] **Tool / function calling for the coach.** Let Claude emit structured
+      action commands (`create_goal`, `toggle_task`, `add_calendar_event`,
+      `create_note`) that the backend parses and executes. Currently the coach
+      can only *speak* — it can't yet *do*.
+- [ ] **Wire the other pages to the backend.** Notes, calendar, intake, and
+      daily are still using sample/local data. Expose real CRUD endpoints and
+      migrate the contexts.
+- [ ] **Activity logging from the frontend** on meaningful UI actions
+      (selecting a goal, opening a page, completing a daily reflection) via
+      `POST /api/activity`.
 
-### P2 — Polish
-- [ ] Re-enable Turbopack once framer-motion / motion releases a fix for React 19 dev stall (track motion repo issues #2668, #2624).
-- [ ] Production build pipeline (`next build && next start`).
-- [ ] Light-mode visual QA pass.
+### P1 — proactive coach
+- [ ] Streaming responses via SSE instead of blocking POST.
+- [ ] Periodic check-ins: scheduled coach messages when the user hasn't
+      completed today's tasks by evening.
+- [ ] Escalate genuinely hard planning turns to Claude **Opus 4.7**.
+
+### P2 — polish & maturity
+- [ ] Light-mode visual QA.
+- [ ] Production bundler: `next build && next start` + re-enable Turbopack
+      once framer-motion fixes the React 19 dev stall (motion repo #2668).
+- [ ] Split the 600-line page files when their logic grows (natural-boundary
+      approach). Not a priority until there's real logic there.
+- [ ] TypeScript coverage pass across stub files.
 
 ## Next Action Items
-1. Confirm with user which pages/features to prioritize next (AI coach? goal persistence? auth?).
-2. On user's green-light, gather required API keys and integrate.
+1. P0: add tool-calling so the coach can mutate state (the "makes changes to
+   calendar, goals, paths, notes" user requirement).
+2. Wire the Notes / Calendar APIs + migrate those pages.
+3. Activity logging from the UI so the coach sees navigation + reflections.
