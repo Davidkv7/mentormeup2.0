@@ -51,10 +51,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   useEffect(() => {
-    // If returning from OAuth, the /dashboard route handles the session_id
-    // exchange first. Skip /me here so we don't race and 401.
+    // If returning from OAuth, the OAuthCallbackHandler exchanges the
+    // session_id first and then calls refresh() itself. Skip /me here so we
+    // don't race and 401 against a not-yet-set cookie.
     if (typeof window !== "undefined" && window.location.hash.includes("session_id=")) {
-      return;
+      // Safety net: if the callback handler silently fails and never refreshes
+      // us, don't leave the UI stuck on the loading screen forever.
+      const timer = setTimeout(() => {
+        setStatus((s) => (s === "loading" ? "anonymous" : s));
+      }, 8000);
+      return () => clearTimeout(timer);
     }
     void refresh();
   }, [refresh]);

@@ -39,13 +39,19 @@ export function OAuthCallbackHandler() {
     (async () => {
       try {
         await api.post("/api/auth/session", { session_id: sessionId });
-        await refresh();
       } catch {
-        // Fall through — user will see login page if auth fails.
+        // Bad/expired session_id — we'll just end up anonymous.
       } finally {
         // Strip the hash so a refresh doesn't try to re-exchange a spent id.
         const url = window.location.pathname + window.location.search;
         window.history.replaceState(null, "", url);
+        // CRITICAL: always refresh, even on failure, so AuthProvider leaves
+        // its "loading" state (it skipped /me while the hash was present).
+        try {
+          await refresh();
+        } catch {
+          // ignore
+        }
         setProcessing(false);
         router.replace("/");
       }
