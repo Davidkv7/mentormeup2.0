@@ -28,19 +28,18 @@ export function GoalInput() {
     setGoal(exampleGoal)
   }
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
-    if (goal.trim()) {
-      // Add goal to context
-      const newGoal = addGoal({
+    if (!goal.trim()) return
+    try {
+      const newGoal = await addGoal({
         title: goal.trim(),
-        status: "active",
         color: "gold",
       })
-      // Set it as the active goal
       setActiveGoal(newGoal.id)
-      // Navigate to intake
       router.push("/intake")
+    } catch {
+      // Surfaced via UI-level error state in a future iteration.
     }
   }
 

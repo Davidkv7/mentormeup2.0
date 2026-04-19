@@ -8,17 +8,14 @@ import React, {
   useMemo,
   useState,
 } from "react";
+import { api, type ApiGoal, type ApiGoalPhase, type ApiGoalTask } from "@/lib/api";
+import { useAuth } from "@/contexts/auth-context";
 
-export interface GoalPhase {
-  id: string;
-  title: string;
-  milestones: {
-    id: string;
-    title: string;
-    status: "complete" | "active" | "locked";
-  }[];
-}
+export type GoalColor = "gold" | "cyan" | "purple" | "green" | "red";
+export type GoalStatus = "active" | "paused" | "completed" | "archived";
 
+// Re-exported under the legacy names so existing UI keeps working unchanged.
+export interface GoalPhase extends ApiGoalPhase {}
 export interface GoalTask {
   id: string;
   title: string;
@@ -31,8 +28,8 @@ export interface Goal {
   id: string;
   title: string;
   description?: string;
-  color: "gold" | "cyan" | "purple" | "green" | "red";
-  status: "active" | "paused" | "completed" | "archived";
+  color: GoalColor;
+  status: GoalStatus;
   progress: number;
   createdAt: string;
   phases: GoalPhase[];
@@ -44,161 +41,126 @@ interface GoalsContextType {
   goals: Goal[];
   activeGoalId: string | null;
   activeGoal: Goal | null;
-  addGoal: (
-    goal: Omit<
-      Goal,
-      "id" | "createdAt" | "progress" | "phases" | "currentPhase" | "dailyTasks"
-    >,
-  ) => Goal;
-  updateGoal: (id: string, updates: Partial<Goal>) => void;
-  deleteGoal: (id: string) => void;
-  setActiveGoal: (id: string) => void;
-  pauseGoal: (id: string) => void;
-  resumeGoal: (id: string) => void;
-  archiveGoal: (id: string) => void;
-  completeTask: (goalId: string, taskId: string) => void;
+  loading: boolean;
+  addGoal: (goal: {
+    title: string;
+    description?: string;
+    color?: GoalColor;
+    status?: GoalStatus;
+  }) => Promise<Goal>;
+  updateGoal: (id: string, updates: Partial<Omit<Goal, "id" | "createdAt">>) => Promise<void>;
+  deleteGoal: (id: string) => Promise<void>;
+  setActiveGoal: (id: string | null) => void;
+  pauseGoal: (id: string) => Promise<void>;
+  resumeGoal: (id: string) => Promise<void>;
+  archiveGoal: (id: string) => Promise<void>;
+  completeTask: (goalId: string, taskId: string) => Promise<void>;
   getGoalById: (id: string) => Goal | undefined;
+  refresh: () => Promise<void>;
 }
 
 const GoalsContext = createContext<GoalsContextType | undefined>(undefined);
-
-const GOAL_COLORS: Goal["color"][] = ["gold", "cyan", "purple", "green", "red"];
-const GOALS_STORAGE_KEY = "mentormeup-goals";
 const ACTIVE_GOAL_STORAGE_KEY = "mentormeup-active-goal";
 
-const createDefaultPhases = (_goalTitle: string): GoalPhase[] => [
-  {
-    id: "phase-1",
-    title: "Foundation & Clarity",
-    milestones: [
-      { id: "m1-1", title: "Define success metrics", status: "active" },
-      { id: "m1-2", title: "Identify current baseline", status: "locked" },
-      { id: "m1-3", title: "Set first milestone target", status: "locked" },
-    ],
-  },
-  {
-    id: "phase-2",
-    title: "Build Momentum",
-    milestones: [
-      { id: "m2-1", title: "Establish daily habits", status: "locked" },
-      { id: "m2-2", title: "Track progress for 2 weeks", status: "locked" },
-      { id: "m2-3", title: "First progress review", status: "locked" },
-    ],
-  },
-  {
-    id: "phase-3",
-    title: "Accelerate & Refine",
-    milestones: [
-      { id: "m3-1", title: "Optimize approach", status: "locked" },
-      { id: "m3-2", title: "Push toward final goal", status: "locked" },
-      { id: "m3-3", title: "Celebrate completion", status: "locked" },
-    ],
-  },
-];
-
-const createDefaultTasks = (goalId: string, goalTitle: string): GoalTask[] => [
-  {
-    id: `${goalId}-task-1`,
-    title: `Review ${goalTitle} progress`,
-    duration: "5 min",
-    completed: false,
-    goalId,
-  },
-  {
-    id: `${goalId}-task-2`,
-    title: `Work on ${goalTitle}`,
-    duration: "30 min",
-    completed: false,
-    goalId,
-  },
-];
+function toGoal(api: ApiGoal): Goal {
+  return {
+    id: api.goal_id,
+    title: api.title,
+    description: api.description ?? undefined,
+    color: api.color,
+    status: api.status,
+    progress: api.progress,
+    createdAt: api.created_at,
+    phases: api.phases,
+    currentPhase: api.current_phase,
+    dailyTasks: api.daily_tasks.map((t: ApiGoalTask) => ({
+      id: t.id,
+      title: t.title,
+      duration: t.duration,
+      completed: t.completed,
+      goalId: t.goal_id,
+    })),
+  };
+}
 
 export function GoalsProvider({ children }: { children: React.ReactNode }) {
+  const { status } = useAuth();
   const [goals, setGoals] = useState<Goal[]>([]);
   const [activeGoalId, setActiveGoalId] = useState<string | null>(null);
-  const [isLoaded, setIsLoaded] = useState(false);
+  const [loading, setLoading] = useState(false);
 
-  // Load from localStorage on mount
-  useEffect(() => {
-    const storedGoals = localStorage.getItem(GOALS_STORAGE_KEY);
-    const storedActiveId = localStorage.getItem(ACTIVE_GOAL_STORAGE_KEY);
-
-    if (storedGoals) {
-      try {
-        const parsed = JSON.parse(storedGoals);
-        setGoals(parsed);
-      } catch {
-        // Corrupt entry — reset silently; user-visible errors would be noise.
-      }
+  const refresh = useCallback(async () => {
+    if (status !== "authenticated") return;
+    setLoading(true);
+    try {
+      const list = await api.get<ApiGoal[]>("/api/goals");
+      setGoals(list.map(toGoal));
+    } finally {
+      setLoading(false);
     }
+  }, [status]);
 
-    if (storedActiveId) {
-      setActiveGoalId(storedActiveId);
+  useEffect(() => {
+    if (status === "authenticated") {
+      void refresh();
+      const stored = typeof window !== "undefined" ? localStorage.getItem(ACTIVE_GOAL_STORAGE_KEY) : null;
+      if (stored) setActiveGoalId(stored);
+    } else if (status === "anonymous") {
+      setGoals([]);
+      setActiveGoalId(null);
     }
-
-    setIsLoaded(true);
-  }, []);
-
-  // Persist to localStorage on changes
-  useEffect(() => {
-    if (!isLoaded) return;
-    localStorage.setItem(GOALS_STORAGE_KEY, JSON.stringify(goals));
-  }, [goals, isLoaded]);
+  }, [status, refresh]);
 
   useEffect(() => {
-    if (!isLoaded) return;
+    if (typeof window === "undefined") return;
     if (activeGoalId) {
       localStorage.setItem(ACTIVE_GOAL_STORAGE_KEY, activeGoalId);
     } else {
       localStorage.removeItem(ACTIVE_GOAL_STORAGE_KEY);
     }
-  }, [activeGoalId, isLoaded]);
+  }, [activeGoalId]);
 
   const activeGoal = useMemo(
-    () => goals.find((g) => g.id === activeGoalId) || null,
+    () => goals.find((g) => g.id === activeGoalId) ?? null,
     [goals, activeGoalId],
   );
 
-  const addGoal = useCallback<GoalsContextType["addGoal"]>((goalData) => {
-    const id = `goal-${Date.now()}`;
-    // Declare outside the setter so we can return it synchronously.
-    let newGoal!: Goal;
-    setGoals((prev) => {
-      const colorIndex = prev.length % GOAL_COLORS.length;
-      newGoal = {
-        ...goalData,
-        id,
-        color: goalData.color || GOAL_COLORS[colorIndex],
-        createdAt: new Date().toISOString(),
-        progress: 0,
-        phases: createDefaultPhases(goalData.title),
-        currentPhase: 1,
-        dailyTasks: createDefaultTasks(id, goalData.title),
-      };
-      // Promote first goal to active inside the updater to avoid stale reads.
-      if (prev.length === 0) {
-        setActiveGoalId(id);
-      }
-      return [...prev, newGoal];
-    });
-    return newGoal;
-  }, []);
-
-  const updateGoal = useCallback<GoalsContextType["updateGoal"]>(
-    (id, updates) => {
-      setGoals((prev) =>
-        prev.map((goal) => (goal.id === id ? { ...goal, ...updates } : goal)),
-      );
+  const addGoal = useCallback<GoalsContextType["addGoal"]>(
+    async ({ title, description, color }) => {
+      const created = await api.post<ApiGoal>("/api/goals", {
+        title,
+        description,
+        color: color ?? "gold",
+      });
+      const next = toGoal(created);
+      setGoals((prev) => {
+        if (prev.length === 0) setActiveGoalId(next.id);
+        return [...prev, next];
+      });
+      return next;
     },
     [],
   );
 
-  const deleteGoal = useCallback<GoalsContextType["deleteGoal"]>((id) => {
+  const updateGoal = useCallback<GoalsContextType["updateGoal"]>(async (id, updates) => {
+    const body: Record<string, unknown> = {};
+    if (updates.title !== undefined) body.title = updates.title;
+    if (updates.description !== undefined) body.description = updates.description;
+    if (updates.status !== undefined) body.status = updates.status;
+    if (updates.progress !== undefined) body.progress = updates.progress;
+    if (updates.currentPhase !== undefined) body.current_phase = updates.currentPhase;
+    const updated = await api.patch<ApiGoal>(`/api/goals/${id}`, body);
+    const next = toGoal(updated);
+    setGoals((prev) => prev.map((g) => (g.id === id ? next : g)));
+  }, []);
+
+  const deleteGoal = useCallback<GoalsContextType["deleteGoal"]>(async (id) => {
+    await api.delete(`/api/goals/${id}`);
     setGoals((prev) => {
-      const remaining = prev.filter((goal) => goal.id !== id);
-      setActiveGoalId((currentActive) => {
-        if (currentActive !== id) return currentActive;
-        return remaining.length > 0 ? remaining[0].id : null;
+      const remaining = prev.filter((g) => g.id !== id);
+      setActiveGoalId((current) => {
+        if (current !== id) return current;
+        return remaining.length ? remaining[0].id : null;
       });
       return remaining;
     });
@@ -218,40 +180,23 @@ export function GoalsProvider({ children }: { children: React.ReactNode }) {
     [updateGoal],
   );
 
-  const archiveGoal = useCallback<GoalsContextType["archiveGoal"]>((id) => {
-    setGoals((prev) => {
-      const next = prev.map((goal) =>
-        goal.id === id ? { ...goal, status: "archived" as const } : goal,
-      );
-      setActiveGoalId((currentActive) => {
-        if (currentActive !== id) return currentActive;
-        const fallback = next.find(
-          (g) => g.id !== id && g.status === "active",
-        );
+  const archiveGoal = useCallback<GoalsContextType["archiveGoal"]>(
+    async (id) => {
+      await updateGoal(id, { status: "archived" });
+      setActiveGoalId((current) => {
+        if (current !== id) return current;
+        const fallback = goals.find((g) => g.id !== id && g.status === "active");
         return fallback ? fallback.id : null;
       });
-      return next;
-    });
-  }, []);
-
-  const completeTask = useCallback<GoalsContextType["completeTask"]>(
-    (goalId, taskId) => {
-      setGoals((prev) =>
-        prev.map((goal) => {
-          if (goal.id !== goalId) return goal;
-          const updatedTasks = goal.dailyTasks.map((task) =>
-            task.id === taskId ? { ...task, completed: !task.completed } : task,
-          );
-          const completedCount = updatedTasks.filter((t) => t.completed).length;
-          const newProgress = updatedTasks.length
-            ? Math.round((completedCount / updatedTasks.length) * 100)
-            : 0;
-          return { ...goal, dailyTasks: updatedTasks, progress: newProgress };
-        }),
-      );
     },
-    [],
+    [updateGoal, goals],
   );
+
+  const completeTask = useCallback<GoalsContextType["completeTask"]>(async (goalId, taskId) => {
+    const updated = await api.post<ApiGoal>(`/api/goals/${goalId}/tasks/${taskId}/toggle`);
+    const next = toGoal(updated);
+    setGoals((prev) => prev.map((g) => (g.id === goalId ? next : g)));
+  }, []);
 
   const getGoalById = useCallback<GoalsContextType["getGoalById"]>(
     (id) => goals.find((g) => g.id === id),
@@ -263,6 +208,7 @@ export function GoalsProvider({ children }: { children: React.ReactNode }) {
       goals,
       activeGoalId,
       activeGoal,
+      loading,
       addGoal,
       updateGoal,
       deleteGoal,
@@ -272,11 +218,13 @@ export function GoalsProvider({ children }: { children: React.ReactNode }) {
       archiveGoal,
       completeTask,
       getGoalById,
+      refresh,
     }),
     [
       goals,
       activeGoalId,
       activeGoal,
+      loading,
       addGoal,
       updateGoal,
       deleteGoal,
@@ -286,12 +234,11 @@ export function GoalsProvider({ children }: { children: React.ReactNode }) {
       archiveGoal,
       completeTask,
       getGoalById,
+      refresh,
     ],
   );
 
-  return (
-    <GoalsContext.Provider value={value}>{children}</GoalsContext.Provider>
-  );
+  return <GoalsContext.Provider value={value}>{children}</GoalsContext.Provider>;
 }
 
 export function useGoals() {
