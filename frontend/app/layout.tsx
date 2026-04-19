@@ -48,19 +48,9 @@ export default function RootLayout({
   return (
     <html lang="en" className={`${syne.variable} ${jetbrainsMono.variable}`} suppressHydrationWarning>
       <head>
-        <script
-          dangerouslySetInnerHTML={{
-            __html: `
-              (function() {
-                try {
-                  var theme = localStorage.getItem('mentormeup-theme') || 'dark';
-                  document.documentElement.classList.add(theme);
-                  document.documentElement.style.backgroundColor = theme === 'light' ? '#F8F9FA' : '#080B14';
-                } catch (e) {}
-              })();
-            `,
-          }}
-        />
+        {/* Theme init runs before hydration to prevent FOUC. Served as a static
+            asset from /public to avoid dangerouslySetInnerHTML. */}
+        <script src="/theme-init.js" />
       </head>
       <body className="font-sans antialiased bg-background text-foreground transition-colors duration-300">
         <ThemeProvider>

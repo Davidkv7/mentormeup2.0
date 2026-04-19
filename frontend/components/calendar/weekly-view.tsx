@@ -56,7 +56,12 @@ export function WeeklyView({
 
   const currentHour = today.getHours();
   const currentMinutes = today.getMinutes();
-  const currentTimeTop = (currentHour - START_HOUR) * hourHeight + (currentMinutes / 60) * hourHeight;
+  const currentTimeTop = useMemo(
+    () =>
+      (currentHour - START_HOUR) * hourHeight +
+      (currentMinutes / 60) * hourHeight,
+    [currentHour, currentMinutes, hourHeight],
+  );
 
   useEffect(() => {
     if (scrollRef.current) {

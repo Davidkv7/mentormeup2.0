@@ -1,6 +1,13 @@
 "use client";
 
-import React, { createContext, useContext, useState, useEffect, useCallback } from "react";
+import React, {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useState,
+} from "react";
 
 export interface GoalPhase {
   id: string;
@@ -37,7 +44,12 @@ interface GoalsContextType {
   goals: Goal[];
   activeGoalId: string | null;
   activeGoal: Goal | null;
-  addGoal: (goal: Omit<Goal, "id" | "createdAt" | "progress" | "phases" | "currentPhase" | "dailyTasks">) => Goal;
+  addGoal: (
+    goal: Omit<
+      Goal,
+      "id" | "createdAt" | "progress" | "phases" | "currentPhase" | "dailyTasks"
+    >,
+  ) => Goal;
   updateGoal: (id: string, updates: Partial<Goal>) => void;
   deleteGoal: (id: string) => void;
   setActiveGoal: (id: string) => void;
@@ -51,8 +63,10 @@ interface GoalsContextType {
 const GoalsContext = createContext<GoalsContextType | undefined>(undefined);
 
 const GOAL_COLORS: Goal["color"][] = ["gold", "cyan", "purple", "green", "red"];
+const GOALS_STORAGE_KEY = "mentormeup-goals";
+const ACTIVE_GOAL_STORAGE_KEY = "mentormeup-active-goal";
 
-const createDefaultPhases = (goalTitle: string): GoalPhase[] => [
+const createDefaultPhases = (_goalTitle: string): GoalPhase[] => [
   {
     id: "phase-1",
     title: "Foundation & Clarity",
@@ -106,136 +120,177 @@ export function GoalsProvider({ children }: { children: React.ReactNode }) {
 
   // Load from localStorage on mount
   useEffect(() => {
-    const storedGoals = localStorage.getItem("mentormeup-goals");
-    const storedActiveId = localStorage.getItem("mentormeup-active-goal");
-    
+    const storedGoals = localStorage.getItem(GOALS_STORAGE_KEY);
+    const storedActiveId = localStorage.getItem(ACTIVE_GOAL_STORAGE_KEY);
+
     if (storedGoals) {
       try {
         const parsed = JSON.parse(storedGoals);
         setGoals(parsed);
-      } catch (e) {
-        console.error("Failed to parse stored goals");
+      } catch {
+        // Corrupt entry — reset silently; user-visible errors would be noise.
       }
     }
-    
+
     if (storedActiveId) {
       setActiveGoalId(storedActiveId);
     }
-    
+
     setIsLoaded(true);
   }, []);
 
   // Persist to localStorage on changes
   useEffect(() => {
-    if (isLoaded) {
-      localStorage.setItem("mentormeup-goals", JSON.stringify(goals));
-    }
+    if (!isLoaded) return;
+    localStorage.setItem(GOALS_STORAGE_KEY, JSON.stringify(goals));
   }, [goals, isLoaded]);
 
   useEffect(() => {
-    if (isLoaded && activeGoalId) {
-      localStorage.setItem("mentormeup-active-goal", activeGoalId);
+    if (!isLoaded) return;
+    if (activeGoalId) {
+      localStorage.setItem(ACTIVE_GOAL_STORAGE_KEY, activeGoalId);
+    } else {
+      localStorage.removeItem(ACTIVE_GOAL_STORAGE_KEY);
     }
   }, [activeGoalId, isLoaded]);
 
-  const activeGoal = goals.find((g) => g.id === activeGoalId) || null;
+  const activeGoal = useMemo(
+    () => goals.find((g) => g.id === activeGoalId) || null,
+    [goals, activeGoalId],
+  );
 
-  const addGoal = useCallback((goalData: Omit<Goal, "id" | "createdAt" | "progress" | "phases" | "currentPhase" | "dailyTasks">) => {
+  const addGoal = useCallback<GoalsContextType["addGoal"]>((goalData) => {
     const id = `goal-${Date.now()}`;
-    const colorIndex = goals.length % GOAL_COLORS.length;
-    
-    const newGoal: Goal = {
-      ...goalData,
-      id,
-      color: goalData.color || GOAL_COLORS[colorIndex],
-      createdAt: new Date().toISOString(),
-      progress: 0,
-      phases: createDefaultPhases(goalData.title),
-      currentPhase: 1,
-      dailyTasks: createDefaultTasks(id, goalData.title),
-    };
-
-    setGoals((prev) => [...prev, newGoal]);
-    
-    // If this is the first goal, make it active
-    if (goals.length === 0) {
-      setActiveGoalId(id);
-    }
-
+    // Declare outside the setter so we can return it synchronously.
+    let newGoal!: Goal;
+    setGoals((prev) => {
+      const colorIndex = prev.length % GOAL_COLORS.length;
+      newGoal = {
+        ...goalData,
+        id,
+        color: goalData.color || GOAL_COLORS[colorIndex],
+        createdAt: new Date().toISOString(),
+        progress: 0,
+        phases: createDefaultPhases(goalData.title),
+        currentPhase: 1,
+        dailyTasks: createDefaultTasks(id, goalData.title),
+      };
+      // Promote first goal to active inside the updater to avoid stale reads.
+      if (prev.length === 0) {
+        setActiveGoalId(id);
+      }
+      return [...prev, newGoal];
+    });
     return newGoal;
-  }, [goals.length]);
-
-  const updateGoal = useCallback((id: string, updates: Partial<Goal>) => {
-    setGoals((prev) =>
-      prev.map((goal) => (goal.id === id ? { ...goal, ...updates } : goal))
-    );
   }, []);
 
-  const deleteGoal = useCallback((id: string) => {
-    setGoals((prev) => prev.filter((goal) => goal.id !== id));
-    if (activeGoalId === id) {
-      const remaining = goals.filter((g) => g.id !== id);
-      setActiveGoalId(remaining.length > 0 ? remaining[0].id : null);
-    }
-  }, [activeGoalId, goals]);
+  const updateGoal = useCallback<GoalsContextType["updateGoal"]>(
+    (id, updates) => {
+      setGoals((prev) =>
+        prev.map((goal) => (goal.id === id ? { ...goal, ...updates } : goal)),
+      );
+    },
+    [],
+  );
 
-  const setActiveGoal = useCallback((id: string) => {
+  const deleteGoal = useCallback<GoalsContextType["deleteGoal"]>((id) => {
+    setGoals((prev) => {
+      const remaining = prev.filter((goal) => goal.id !== id);
+      setActiveGoalId((currentActive) => {
+        if (currentActive !== id) return currentActive;
+        return remaining.length > 0 ? remaining[0].id : null;
+      });
+      return remaining;
+    });
+  }, []);
+
+  const setActiveGoal = useCallback<GoalsContextType["setActiveGoal"]>((id) => {
     setActiveGoalId(id);
   }, []);
 
-  const pauseGoal = useCallback((id: string) => {
-    updateGoal(id, { status: "paused" });
-  }, [updateGoal]);
+  const pauseGoal = useCallback<GoalsContextType["pauseGoal"]>(
+    (id) => updateGoal(id, { status: "paused" }),
+    [updateGoal],
+  );
 
-  const resumeGoal = useCallback((id: string) => {
-    updateGoal(id, { status: "active" });
-  }, [updateGoal]);
+  const resumeGoal = useCallback<GoalsContextType["resumeGoal"]>(
+    (id) => updateGoal(id, { status: "active" }),
+    [updateGoal],
+  );
 
-  const archiveGoal = useCallback((id: string) => {
-    updateGoal(id, { status: "archived" });
-    if (activeGoalId === id) {
-      const activeGoals = goals.filter((g) => g.id !== id && g.status === "active");
-      setActiveGoalId(activeGoals.length > 0 ? activeGoals[0].id : null);
-    }
-  }, [updateGoal, activeGoalId, goals]);
-
-  const completeTask = useCallback((goalId: string, taskId: string) => {
-    setGoals((prev) =>
-      prev.map((goal) => {
-        if (goal.id !== goalId) return goal;
-        const updatedTasks = goal.dailyTasks.map((task) =>
-          task.id === taskId ? { ...task, completed: !task.completed } : task
+  const archiveGoal = useCallback<GoalsContextType["archiveGoal"]>((id) => {
+    setGoals((prev) => {
+      const next = prev.map((goal) =>
+        goal.id === id ? { ...goal, status: "archived" as const } : goal,
+      );
+      setActiveGoalId((currentActive) => {
+        if (currentActive !== id) return currentActive;
+        const fallback = next.find(
+          (g) => g.id !== id && g.status === "active",
         );
-        const completedCount = updatedTasks.filter((t) => t.completed).length;
-        const newProgress = Math.round((completedCount / updatedTasks.length) * 100);
-        return { ...goal, dailyTasks: updatedTasks, progress: newProgress };
-      })
-    );
+        return fallback ? fallback.id : null;
+      });
+      return next;
+    });
   }, []);
 
-  const getGoalById = useCallback((id: string) => {
-    return goals.find((g) => g.id === id);
-  }, [goals]);
+  const completeTask = useCallback<GoalsContextType["completeTask"]>(
+    (goalId, taskId) => {
+      setGoals((prev) =>
+        prev.map((goal) => {
+          if (goal.id !== goalId) return goal;
+          const updatedTasks = goal.dailyTasks.map((task) =>
+            task.id === taskId ? { ...task, completed: !task.completed } : task,
+          );
+          const completedCount = updatedTasks.filter((t) => t.completed).length;
+          const newProgress = updatedTasks.length
+            ? Math.round((completedCount / updatedTasks.length) * 100)
+            : 0;
+          return { ...goal, dailyTasks: updatedTasks, progress: newProgress };
+        }),
+      );
+    },
+    [],
+  );
+
+  const getGoalById = useCallback<GoalsContextType["getGoalById"]>(
+    (id) => goals.find((g) => g.id === id),
+    [goals],
+  );
+
+  const value = useMemo<GoalsContextType>(
+    () => ({
+      goals,
+      activeGoalId,
+      activeGoal,
+      addGoal,
+      updateGoal,
+      deleteGoal,
+      setActiveGoal,
+      pauseGoal,
+      resumeGoal,
+      archiveGoal,
+      completeTask,
+      getGoalById,
+    }),
+    [
+      goals,
+      activeGoalId,
+      activeGoal,
+      addGoal,
+      updateGoal,
+      deleteGoal,
+      setActiveGoal,
+      pauseGoal,
+      resumeGoal,
+      archiveGoal,
+      completeTask,
+      getGoalById,
+    ],
+  );
 
   return (
-    <GoalsContext.Provider
-      value={{
-        goals,
-        activeGoalId,
-        activeGoal,
-        addGoal,
-        updateGoal,
-        deleteGoal,
-        setActiveGoal,
-        pauseGoal,
-        resumeGoal,
-        archiveGoal,
-        completeTask,
-        getGoalById,
-      }}
-    >
-      {children}
-    </GoalsContext.Provider>
+    <GoalsContext.Provider value={value}>{children}</GoalsContext.Provider>
   );
 }
 

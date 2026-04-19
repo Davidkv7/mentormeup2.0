@@ -424,10 +424,11 @@ export default function NotesPage() {
                 {/* Note Content */}
                 <div className="space-y-4">
                   {selectedNote.content.map((block, index) => {
+                    const blockKey = `${selectedNote.id}-block-${index}-${block.type}`;
                     if (block.type === "callout") {
                       return (
                         <div
-                          key={index}
+                          key={blockKey}
                           className={`p-4 rounded-xl border-l-4 ${
                             block.variant === "insight"
                               ? `border-l-[#00D4FF] ${isDark ? "bg-[rgba(0,212,255,0.08)]" : "bg-[rgba(0,212,255,0.06)]"}`
@@ -444,14 +445,14 @@ export default function NotesPage() {
                     }
                     if (block.type === "heading") {
                       return (
-                        <h3 key={index} className={`font-sans font-semibold text-lg ${isDark ? "text-white" : "text-[#1A1D21]"} mt-6`}>
+                        <h3 key={blockKey} className={`font-sans font-semibold text-lg ${isDark ? "text-white" : "text-[#1A1D21]"} mt-6`}>
                           {block.content}
                         </h3>
                       );
                     }
                     if (block.type === "paragraph") {
                       return (
-                        <p key={index} className={`font-sans text-sm leading-relaxed ${isDark ? "text-[rgba(255,255,255,0.7)]" : "text-[rgba(0,0,0,0.7)]"}`}>
+                        <p key={blockKey} className={`font-sans text-sm leading-relaxed ${isDark ? "text-[rgba(255,255,255,0.7)]" : "text-[rgba(0,0,0,0.7)]"}`}>
                           {block.content}
                         </p>
                       );

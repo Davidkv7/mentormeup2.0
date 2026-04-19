@@ -44,6 +44,22 @@ Tagline: *"Any person. Any goal. One AI that gets you there."*
   - Fix 2: Switched Next.js dev bundler from Turbopack (default in v16) to Webpack via `--webpack` flag.
 - App verified running end-to-end: landing page animates in correctly, logo/tagline/input/CTA/goal chips all visible.
 
+### Code-Review Fixes (Jan 2026 — session 2)
+Applied the Critical + safer Important items from the `mentor-hub-141` review:
+- **Security — removed `dangerouslySetInnerHTML`** in `app/layout.tsx`. Theme-init script moved to static `public/theme-init.js` and loaded via `<script src="/theme-init.js">` (still runs pre-hydration, no XSS surface).
+- **Hook dependency bugs**:
+  - `contexts/goals-context.tsx`: rewrote all callbacks to use functional `setState` updaters so closures can't go stale; wrapped the context value in `useMemo`; switched silent catch for localStorage parse; memoized `activeGoal`.
+  - `contexts/theme-context.tsx`: wrapped `toggleTheme`/`setTheme` in `useCallback`, `useMemo`-ed context value, extracted `applyThemeToDocument` helper.
+  - `hooks/use-toast.ts`: corrected subscribe effect's dep array from `[state]` → `[]` (was re-subscribing on every state change).
+  - `components/calendar/weekly-view.tsx`: wrapped `currentTimeTop` in `useMemo` so the scroll effect only re-runs when its inputs change.
+- **Array-index keys replaced with stable IDs**:
+  - `app/notes/page.tsx`: `${selectedNote.id}-block-${index}-${block.type}` key on content blocks.
+  - `app/health/page.tsx`: tooltip `payload.map` now keys on `entry.dataKey ?? entry.name`.
+- **Cleanliness**:
+  - Removed `console.log("Saving note:"…)` in `app/notes/new/page.tsx`.
+  - Removed unused `Heart`, `TrendingUp` imports from `app/health/page.tsx`.
+- Verified: `/`, `/notes`, `/health` all render with zero runtime errors after fixes.
+
 ## Architecture Notes / Deviations from Standard Emergent Template
 - The default `/app/backend` (FastAPI) and MongoDB are **not used** by this project — the supervisor's `backend` program may log "No such file" style errors; that's expected since the imported app is frontend-only for now.
 - Supervisor runs `yarn start` from `/app/frontend`, which we remapped to `next dev --webpack`.

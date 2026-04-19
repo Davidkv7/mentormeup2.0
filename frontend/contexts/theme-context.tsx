@@ -1,6 +1,14 @@
 "use client";
 
-import { createContext, useContext, useState, useEffect, type ReactNode } from "react";
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useState,
+  type ReactNode,
+} from "react";
 
 type Theme = "dark" | "light";
 
@@ -12,6 +20,17 @@ interface ThemeContextType {
 
 const ThemeContext = createContext<ThemeContextType | undefined>(undefined);
 
+const THEME_STORAGE_KEY = "mentormeup-theme";
+const LIGHT_BG = "#F8F9FA";
+const DARK_BG = "#080B14";
+
+const applyThemeToDocument = (theme: Theme) => {
+  document.documentElement.classList.remove("light", "dark");
+  document.documentElement.classList.add(theme);
+  document.documentElement.style.backgroundColor =
+    theme === "light" ? LIGHT_BG : DARK_BG;
+};
+
 export function ThemeProvider({ children }: { children: ReactNode }) {
   const [theme, setThemeState] = useState<Theme>("dark");
   const [mounted, setMounted] = useState(false);
@@ -19,44 +38,34 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
   // Load theme from localStorage on mount
   useEffect(() => {
     setMounted(true);
-    const savedTheme = localStorage.getItem("mentormeup-theme") as Theme | null;
+    const savedTheme = localStorage.getItem(THEME_STORAGE_KEY) as Theme | null;
     const initialTheme = savedTheme || "dark";
     setThemeState(initialTheme);
-    
-    // Remove both classes first, then add the correct one
-    document.documentElement.classList.remove("light", "dark");
-    document.documentElement.classList.add(initialTheme);
-    
-    // Set background color
-    document.documentElement.style.backgroundColor = initialTheme === "light" ? "#F8F9FA" : "#080B14";
+    applyThemeToDocument(initialTheme);
   }, []);
 
   // Update document class and localStorage when theme changes
   useEffect(() => {
-    if (mounted) {
-      localStorage.setItem("mentormeup-theme", theme);
-      
-      // Remove both classes first, then add the correct one
-      document.documentElement.classList.remove("light", "dark");
-      document.documentElement.classList.add(theme);
-      
-      // Update background color on html element
-      document.documentElement.style.backgroundColor = theme === "light" ? "#F8F9FA" : "#080B14";
-    }
+    if (!mounted) return;
+    localStorage.setItem(THEME_STORAGE_KEY, theme);
+    applyThemeToDocument(theme);
   }, [theme, mounted]);
 
-  const toggleTheme = () => {
+  const toggleTheme = useCallback(() => {
     setThemeState((prev) => (prev === "dark" ? "light" : "dark"));
-  };
+  }, []);
 
-  const setTheme = (newTheme: Theme) => {
+  const setTheme = useCallback((newTheme: Theme) => {
     setThemeState(newTheme);
-  };
+  }, []);
+
+  const value = useMemo<ThemeContextType>(
+    () => ({ theme, toggleTheme, setTheme }),
+    [theme, toggleTheme, setTheme],
+  );
 
   return (
-    <ThemeContext.Provider value={{ theme, toggleTheme, setTheme }}>
-      {children}
-    </ThemeContext.Provider>
+    <ThemeContext.Provider value={value}>{children}</ThemeContext.Provider>
   );
 }
 

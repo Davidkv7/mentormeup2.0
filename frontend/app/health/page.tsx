@@ -7,8 +7,6 @@ import {
   Smartphone,
   Activity,
   Moon,
-  Heart,
-  TrendingUp,
   Footprints,
   Flame,
   Zap,
@@ -227,9 +225,9 @@ function CustomTooltip({ active, payload, label, isDark }: any) {
     return (
       <div className={`px-3 py-2 rounded-lg border ${isDark ? "bg-[rgba(13,17,23,0.95)] border-[rgba(255,255,255,0.1)]" : "bg-white border-[rgba(0,0,0,0.1)]"}`}>
         <p className={`font-mono text-xs ${isDark ? "text-[rgba(255,255,255,0.6)]" : "text-[rgba(0,0,0,0.6)]"}`}>{label}</p>
-        {payload.map((entry: any, index: number) => (
+        {payload.map((entry: any) => (
           <p
-            key={index}
+            key={entry.dataKey ?? entry.name}
             className="font-mono text-sm font-medium"
             style={{ color: entry.color }}
           >

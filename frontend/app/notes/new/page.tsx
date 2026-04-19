@@ -97,8 +97,8 @@ export default function NewNotePage() {
   };
 
   const handleSave = () => {
-    // In a real app, save to database/context
-    console.log("Saving note:", { title, linkedGoalId, blocks });
+    // TODO: persist to database/context once backend is wired.
+    // Payload for reference: { title, linkedGoalId, blocks }
     router.push("/notes");
   };
 
