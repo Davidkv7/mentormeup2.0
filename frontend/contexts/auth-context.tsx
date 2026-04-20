@@ -9,7 +9,7 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import { api, ApiError, type AuthUser } from "@/lib/api";
+import { api, ApiError, setAuthToken, type AuthUser } from "@/lib/api";
 
 interface AuthContextValue {
   user: AuthUser | null;
@@ -30,13 +30,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       setUser(me);
       setStatus("authenticated");
     } catch (err) {
+      // Any failure → anonymous. Also clear any stale stored token so we
+      // don't keep sending a dead Bearer header.
       if (err instanceof ApiError && err.status === 401) {
-        setUser(null);
-        setStatus("anonymous");
-      } else {
-        setUser(null);
-        setStatus("anonymous");
+        setAuthToken(null);
       }
+      setUser(null);
+      setStatus("anonymous");
     }
   }, []);
 
@@ -46,6 +46,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     } catch {
       // Ignore; we'll clear local state regardless.
     }
+    setAuthToken(null);
     setUser(null);
     setStatus("anonymous");
   }, []);

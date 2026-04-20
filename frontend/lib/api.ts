@@ -1,18 +1,17 @@
 /**
  * Minimal fetch wrapper for the MentorMeUp backend.
- * - Uses a RELATIVE URL (no host prefix) so every request is first-party to
- *   whatever preview hostname the browser is on — this is required because
- *   the Emergent preview serves the app from multiple hosts (e.g.
- *   mentor-hub-141.preview.emergentagent.com AND the id-based one), and the
- *   httpOnly auth cookie must be first-party or mobile browsers will silently
- *   drop it (iOS Safari / Chrome third-party cookie blocking).
- * - Always sends credentials so the cookie rides along.
- * - Throws a typed ApiError on non-2xx so callers can react.
+ *
+ * Auth strategy — works everywhere including Safari Private Mode:
+ * - On login we receive a `session_token` and store it in localStorage.
+ * - Every request sends it as `Authorization: Bearer <token>`.
+ * - We still send cookies (`credentials: 'include'`) as a belt-and-braces
+ *   fallback; browsers that accept the cookie will use it, browsers that
+ *   drop it (Safari Private Mode, iOS) use the Bearer header instead.
+ * - All requests use RELATIVE URLs so they're first-party to whatever
+ *   preview hostname the user is on.
  */
-// Empty base ⇒ relative URLs (same-origin fetch). A user-provided
-// NEXT_PUBLIC_BACKEND_URL is still respected as an explicit override (useful
-// for local dev hitting a separate backend).
 const BASE = process.env.NEXT_PUBLIC_BACKEND_URL_OVERRIDE ?? "";
+const TOKEN_KEY = "mentormeup.auth.token";
 
 export class ApiError extends Error {
   status: number;
@@ -24,15 +23,39 @@ export class ApiError extends Error {
   }
 }
 
+export function getAuthToken(): string | null {
+  if (typeof window === "undefined") return null;
+  try {
+    return localStorage.getItem(TOKEN_KEY);
+  } catch {
+    return null;
+  }
+}
+
+export function setAuthToken(token: string | null): void {
+  if (typeof window === "undefined") return;
+  try {
+    if (token) localStorage.setItem(TOKEN_KEY, token);
+    else localStorage.removeItem(TOKEN_KEY);
+  } catch {
+    // localStorage blocked (some private modes) — fall back to cookie only.
+  }
+}
+
 async function request<T>(
   method: "GET" | "POST" | "PATCH" | "DELETE",
   path: string,
   body?: unknown,
 ): Promise<T> {
+  const headers: Record<string, string> = {};
+  if (body) headers["Content-Type"] = "application/json";
+  const token = getAuthToken();
+  if (token) headers["Authorization"] = `Bearer ${token}`;
+
   const res = await fetch(`${BASE}${path}`, {
     method,
     credentials: "include",
-    headers: body ? { "Content-Type": "application/json" } : undefined,
+    headers,
     body: body ? JSON.stringify(body) : undefined,
     cache: "no-store",
   });

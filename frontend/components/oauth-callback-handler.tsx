@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { api } from "@/lib/api";
+import { api, setAuthToken, type AuthUser } from "@/lib/api";
 import { useAuth } from "@/contexts/auth-context";
 
 /**
@@ -51,7 +51,14 @@ export function OAuthCallbackHandler() {
 
     (async () => {
       try {
-        await api.post("/api/auth/session", { session_id: sessionId });
+        const res = await api.post<{ session_token: string; user: AuthUser }>(
+          "/api/auth/session",
+          { session_id: sessionId },
+        );
+        // Safari Private Mode blocks cookies — persist the token in
+        // localStorage so the subsequent /api/auth/me call can authenticate
+        // via the Authorization: Bearer header.
+        if (res.session_token) setAuthToken(res.session_token);
       } catch {
         // Expired / invalid session_id — refresh will end us up anonymous.
       } finally {
