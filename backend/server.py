@@ -27,6 +27,10 @@ DB_NAME = os.environ["DB_NAME"]
 EMERGENT_LLM_KEY = os.environ["EMERGENT_LLM_KEY"]
 EMERGENT_AUTH_SESSION_URL = os.environ["EMERGENT_AUTH_SESSION_URL"]
 CORS_ORIGINS = [o.strip() for o in os.environ.get("CORS_ORIGINS", "").split(",") if o.strip()]
+CORS_ORIGIN_REGEX = os.environ.get(
+    "CORS_ORIGIN_REGEX",
+    r"https://.*\.(emergentagent\.com|emergentcf\.cloud)$",
+)
 
 COACH_MODEL_PROVIDER = "anthropic"
 COACH_MODEL_NAME = "claude-sonnet-4-6"
@@ -194,7 +198,8 @@ app = FastAPI(title="MentorMeUp API")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=CORS_ORIGINS or ["*"],
+    allow_origins=CORS_ORIGINS or [],
+    allow_origin_regex=CORS_ORIGIN_REGEX,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -233,16 +238,21 @@ async def get_current_user(
 
 # ------------------------------------------------------------------ auth routes
 @app.post("/api/auth/session")
-async def exchange_session(body: AuthSessionRequest, response: Response):
+async def exchange_session(body: AuthSessionRequest, request: Request, response: Response):
     """Exchange Emergent session_id for a session_token, create/update user, set cookie."""
+    import sys
+    origin = request.headers.get("origin", "?")
+    print(f"[auth.session] POST from origin={origin} session_id={body.session_id[:10]}…", flush=True, file=sys.stderr)
     async with httpx.AsyncClient(timeout=15.0) as client:
         r = await client.get(
             EMERGENT_AUTH_SESSION_URL,
             headers={"X-Session-ID": body.session_id},
         )
     if r.status_code != 200:
+        print(f"[auth.session] Emergent returned {r.status_code}: {r.text[:200]}", flush=True, file=sys.stderr)
         raise HTTPException(status_code=401, detail="Invalid Emergent session_id")
     data = r.json()
+    print(f"[auth.session] Emergent OK: email={data.get('email')} name={data.get('name')}", flush=True, file=sys.stderr)
     email = data["email"]
     name = data["name"]
     picture = data.get("picture")
