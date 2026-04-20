@@ -239,10 +239,41 @@ async def get_current_user(
 # ------------------------------------------------------------------ auth routes
 @app.post("/api/auth/session")
 async def exchange_session(body: AuthSessionRequest, request: Request, response: Response):
-    """Exchange Emergent session_id for a session_token, create/update user, set cookie."""
+    """Exchange Emergent session_id for a session_token, create/update user, set cookie.
+
+    Deduplicates concurrent requests with the same session_id: if we've already
+    consumed this id against Emergent's single-use endpoint in the last 60s,
+    we reuse the resulting session_token instead of calling Emergent again
+    (which would return 404 user_data_not_found).
+    """
     import sys
     origin = request.headers.get("origin", "?")
     print(f"[auth.session] POST from origin={origin} session_id={body.session_id[:10]}…", flush=True, file=sys.stderr)
+
+    # Check if we already processed this session_id (within the last 2 hours).
+    existing = await db.user_sessions.find_one(
+        {"emergent_session_id": body.session_id}, {"_id": 0}
+    )
+    if existing:
+        expires_at = existing["expires_at"]
+        if isinstance(expires_at, str):
+            expires_at = datetime.fromisoformat(expires_at)
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=timezone.utc)
+        if expires_at >= _now():
+            print(f"[auth.session] DEDUP hit — reusing existing session_token for session_id", flush=True, file=sys.stderr)
+            response.set_cookie(
+                key="session_token",
+                value=existing["session_token"],
+                httponly=True,
+                secure=True,
+                samesite="none",
+                path="/",
+                max_age=SESSION_DURATION_DAYS * 24 * 60 * 60,
+            )
+            user_doc = await db.users.find_one({"user_id": existing["user_id"]}, {"_id": 0})
+            return {"user": User(**user_doc).model_dump(mode="json"), "session_token": existing["session_token"]}
+
     async with httpx.AsyncClient(timeout=15.0) as client:
         r = await client.get(
             EMERGENT_AUTH_SESSION_URL,
@@ -282,6 +313,7 @@ async def exchange_session(body: AuthSessionRequest, request: Request, response:
         {
             "user_id": user_id,
             "session_token": session_token,
+            "emergent_session_id": body.session_id,
             "expires_at": expires_at,
             "created_at": _now(),
         }
