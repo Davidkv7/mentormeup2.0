@@ -216,7 +216,7 @@ export default function IntakePage() {
         {/* Messages */}
         <div
           ref={scrollRef}
-          className="flex-1 overflow-y-auto px-4 sm:px-6 lg:px-10 py-6 sm:py-8 pb-40"
+          className="flex-1 overflow-y-auto px-4 sm:px-6 lg:px-10 py-6 sm:py-8 pb-[220px] md:pb-40"
           data-testid="intake-messages"
         >
           {!bootstrapped && (
@@ -325,7 +325,7 @@ export default function IntakePage() {
         {!isBuilding && goalId && (
           <form
             onSubmit={handleSend}
-            className={`fixed bottom-0 left-0 right-0 md:left-[72px] lg:left-[240px] px-4 sm:px-6 lg:px-10 py-4 border-t ${
+            className={`fixed bottom-[72px] left-0 right-0 md:bottom-0 md:left-[72px] lg:left-[240px] px-4 sm:px-6 lg:px-10 py-4 pb-[calc(16px+env(safe-area-inset-bottom))] md:pb-4 border-t z-30 ${
               isDark ? "bg-[#080B14]/95 border-[rgba(255,255,255,0.06)]" : "bg-[#F8F9FA]/95 border-[rgba(0,0,0,0.06)]"
             }`}
             style={{ backdropFilter: "blur(20px)" }}

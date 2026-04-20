@@ -53,7 +53,7 @@ export function CoachWidget() {
             whileHover={{ scale: 1.08 }}
             whileTap={{ scale: 0.95 }}
             data-testid="coach-orb"
-            className="fixed bottom-5 right-5 sm:bottom-7 sm:right-7 z-40 w-14 h-14 sm:w-16 sm:h-16 rounded-full flex items-center justify-center shadow-[0_8px_28px_rgba(245,197,24,0.35)]"
+            className="fixed bottom-[84px] right-4 sm:bottom-7 sm:right-7 z-40 w-14 h-14 sm:w-16 sm:h-16 rounded-full flex items-center justify-center shadow-[0_8px_28px_rgba(245,197,24,0.35)]"
             style={{
               background:
                 "radial-gradient(circle at 30% 30%, #FFD633 0%, #F5C518 45%, #D4A912 100%)",
@@ -87,7 +87,7 @@ export function CoachWidget() {
               exit={{ x: "100%" }}
               transition={{ duration: 0.35, ease: [0.25, 0.4, 0.25, 1] }}
               data-testid="coach-drawer"
-              className={`fixed top-0 right-0 z-50 h-screen w-full sm:w-[420px] md:w-[460px] flex flex-col border-l ${
+              className={`fixed top-0 right-0 z-50 h-[100dvh] w-full sm:w-[420px] md:w-[460px] flex flex-col border-l ${
                 isDark
                   ? "bg-[#080B14] border-[rgba(255,255,255,0.06)]"
                   : "bg-[#F8F9FA] border-[rgba(0,0,0,0.06)]"
@@ -206,7 +206,7 @@ export function CoachWidget() {
               {/* Input */}
               <form
                 onSubmit={handleSubmit}
-                className={`border-t px-4 py-3 flex items-center gap-2 ${
+                className={`border-t px-4 py-3 pb-[calc(12px+env(safe-area-inset-bottom))] flex items-center gap-2 ${
                   isDark ? "border-[rgba(255,255,255,0.06)]" : "border-[rgba(0,0,0,0.06)]"
                 }`}
               >
