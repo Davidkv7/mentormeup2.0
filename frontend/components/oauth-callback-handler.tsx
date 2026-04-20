@@ -12,16 +12,18 @@ import { useAuth } from "@/contexts/auth-context";
  * the backend (which sets the httpOnly cookie), then cleans the URL and
  * refreshes the auth context. Render it once, near the top of the tree.
  *
- * The detection is done during the first render so it beats any race with a
- * sibling `useEffect` that tries to hit `/api/auth/me`.
+ * IMPORTANT: initial render must produce IDENTICAL output on server and
+ * client, because `window.location.hash` is never visible to the server (the
+ * fragment is never sent in HTTP requests). Reading the hash synchronously
+ * during the initial render causes a hydration mismatch. Instead, we always
+ * start with `processing=false`, and decide whether to show the overlay in a
+ * useEffect that only runs on the client.
  */
 export function OAuthCallbackHandler() {
   const router = useRouter();
   const { refresh } = useAuth();
   const didRun = useRef(false);
-  const [processing, setProcessing] = useState(
-    () => typeof window !== "undefined" && window.location.hash.includes("session_id="),
-  );
+  const [processing, setProcessing] = useState(false);
 
   useEffect(() => {
     if (didRun.current) return;
@@ -29,6 +31,7 @@ export function OAuthCallbackHandler() {
     const hash = window.location.hash;
     if (!hash.includes("session_id=")) return;
     didRun.current = true;
+    setProcessing(true);
 
     const sessionId = new URLSearchParams(hash.replace(/^#/, "")).get("session_id");
     if (!sessionId) {
