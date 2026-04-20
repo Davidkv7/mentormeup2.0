@@ -18,6 +18,7 @@ interface NewBlockModalProps {
   isOpen: boolean;
   onClose: () => void;
   onSave: (event: Omit<CalendarEvent, "id">) => void;
+  onDelete?: (eventId: string) => void;
   initialDate?: Date;
   initialHour?: number;
   editEvent?: CalendarEvent | null;
@@ -27,6 +28,7 @@ export function NewBlockModal({
   isOpen,
   onClose,
   onSave,
+  onDelete,
   initialDate,
   initialHour,
   editEvent,
@@ -353,10 +355,27 @@ export function NewBlockModal({
                     disabled={!title.trim()}
                     whileHover={{ scale: 1.02 }}
                     whileTap={{ scale: 0.98 }}
+                    data-testid="calendar-save-event-button"
                     className="w-full py-3.5 sm:py-4 rounded-lg sm:rounded-xl bg-gradient-to-r from-[#F5C518] to-[#E5B516] text-[#080B14] font-sans font-bold text-xs sm:text-sm transition-all duration-200 hover:from-[#FFD633] hover:to-[#F5C518] disabled:opacity-40 disabled:cursor-not-allowed shadow-[0_4px_20px_rgba(245,197,24,0.3),0_8px_32px_rgba(245,197,24,0.15)]"
                   >
-                    Save Block
+                    {editEvent ? "Save changes" : "Save Block"}
                   </motion.button>
+
+                  {editEvent && onDelete && (
+                    <motion.button
+                      onClick={() => onDelete(editEvent.id)}
+                      whileHover={{ scale: 1.01 }}
+                      whileTap={{ scale: 0.98 }}
+                      data-testid="calendar-delete-event-button"
+                      className={`w-full py-2.5 sm:py-3 rounded-lg sm:rounded-xl border font-sans font-semibold text-xs sm:text-sm transition-all ${
+                        isDark
+                          ? "bg-transparent border-[rgba(239,68,68,0.25)] text-[#F87171] hover:bg-[rgba(239,68,68,0.08)]"
+                          : "bg-transparent border-[rgba(239,68,68,0.3)] text-[#DC2626] hover:bg-[rgba(239,68,68,0.06)]"
+                      }`}
+                    >
+                      Delete block
+                    </motion.button>
+                  )}
                 </div>
               </div>
             </div>

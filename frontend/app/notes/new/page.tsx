@@ -24,6 +24,8 @@ import {
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useGoals } from "@/contexts/goals-context";
+import { api } from "@/lib/api";
+import { logActivity } from "@/lib/activity";
 
 interface EditorBlock {
   id: string;
@@ -31,6 +33,42 @@ interface EditorBlock {
   content: string;
   items?: { id: string; text: string; checked?: boolean }[];
   variant?: "insight" | "tip" | "warning";
+}
+
+function blocksToPlainText(blocks: EditorBlock[]): string {
+  return blocks
+    .map((b) => {
+      switch (b.type) {
+        case "heading1":
+          return b.content ? `# ${b.content}` : "";
+        case "heading2":
+          return b.content ? `## ${b.content}` : "";
+        case "callout":
+          return b.content ? `> ${b.content}` : "";
+        case "divider":
+          return "---";
+        case "checklist":
+          return (b.items ?? [])
+            .map((it) => `${it.checked ? "[x]" : "[ ]"} ${it.text}`)
+            .filter((s) => s.trim().length > 3)
+            .join("\n");
+        case "bullets":
+          return (b.items ?? [])
+            .map((it) => `- ${it.text}`)
+            .filter((s) => s.trim().length > 2)
+            .join("\n");
+        default:
+          return b.content ?? "";
+      }
+    })
+    .filter((s) => s.trim().length > 0)
+    .join("\n\n");
+}
+
+function deriveTitleFromContent(content: string): string {
+  const firstLine = content.split("\n").find((l) => l.trim().length > 0) ?? "";
+  const cleaned = firstLine.replace(/^#+\s*/, "").replace(/^>\s*/, "").trim();
+  return cleaned.length > 60 ? `${cleaned.slice(0, 57)}…` : cleaned;
 }
 
 export default function NewNotePage() {
@@ -48,13 +86,12 @@ export default function NewNotePage() {
   const [blocks, setBlocks] = useState<EditorBlock[]>([
     { id: "block-1", type: "paragraph", content: "" },
   ]);
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
 
-  // Sample goals for linking (use context goals if available, else fallback)
-  const availableGoals = goals.length > 0 ? goals : [
-    { id: "sample-1", title: "Lose 15kg", color: "gold" as const },
-    { id: "sample-2", title: "Start Freelancing", color: "cyan" as const },
-    { id: "sample-3", title: "Build Personal Brand", color: "purple" as const },
-  ];
+  // Goals for the goal-picker. Avoid sample fallbacks — only real goals can be
+  // linked because the backend validates goal ownership.
+  const availableGoals = goals;
 
   // Focus title on mount
   useEffect(() => {
@@ -96,10 +133,28 @@ export default function NewNotePage() {
     }, 1500);
   };
 
-  const handleSave = () => {
-    // TODO: persist to database/context once backend is wired.
-    // Payload for reference: { title, linkedGoalId, blocks }
-    router.push("/notes");
+  const handleSave = async () => {
+    if (saving) return;
+    setSaving(true);
+    setSaveError(null);
+    const content = blocksToPlainText(blocks);
+    const fallbackTitle = title.trim() || deriveTitleFromContent(content) || "Untitled note";
+    try {
+      const saved = await api.post<{ note_id: string; title: string }>("/api/notes", {
+        title: fallbackTitle,
+        content,
+        goal_id: linkedGoalId,
+        tags: [],
+      });
+      logActivity("note.created", `Created note: ${saved.title}`, {
+        note_id: saved.note_id,
+        goal_id: linkedGoalId,
+      });
+      router.push("/notes");
+    } catch (err) {
+      setSaveError(err instanceof Error ? err.message : "Could not save note");
+      setSaving(false);
+    }
   };
 
   const toolbarButtons = [
@@ -165,10 +220,17 @@ export default function NewNotePage() {
             whileHover={{ scale: 1.02 }}
             whileTap={{ scale: 0.98 }}
             onClick={handleSave}
-            className="px-4 py-2 rounded-xl bg-gradient-to-r from-[#F5C518] to-[#E5B516] text-[#080B14] font-sans font-semibold text-sm shadow-[0_4px_16px_rgba(245,197,24,0.25)] hover:shadow-[0_4px_24px_rgba(245,197,24,0.35)] transition-shadow"
+            disabled={saving}
+            data-testid="note-save-button"
+            className="px-4 py-2 rounded-xl bg-gradient-to-r from-[#F5C518] to-[#E5B516] text-[#080B14] font-sans font-semibold text-sm shadow-[0_4px_16px_rgba(245,197,24,0.25)] hover:shadow-[0_4px_24px_rgba(245,197,24,0.35)] transition-shadow disabled:opacity-60 disabled:cursor-not-allowed"
           >
-            Save
+            {saving ? "Saving…" : "Save"}
           </motion.button>
+          {saveError && (
+            <span className="text-xs font-mono text-red-400" data-testid="note-save-error">
+              {saveError}
+            </span>
+          )}
 
           {/* Options menu */}
           <div className="relative">

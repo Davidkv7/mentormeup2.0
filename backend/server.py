@@ -1321,6 +1321,135 @@ async def delete_note_endpoint(note_id: str, user: User = Depends(get_current_us
 
 
 # =====================================================================
+# CALENDAR EVENTS CRUD
+# =====================================================================
+
+CALENDAR_COLORS = ("gold", "cyan", "purple", "green", "red")
+
+
+class CalendarEventCreate(BaseModel):
+    title: str
+    start: datetime
+    end: datetime
+    color: Literal["gold", "cyan", "purple", "green", "red"] = "gold"
+    notes: str | None = None
+    is_ai_scheduled: bool = False
+    goal_id: str | None = None
+
+
+class CalendarEventUpdate(BaseModel):
+    title: str | None = None
+    start: datetime | None = None
+    end: datetime | None = None
+    color: Literal["gold", "cyan", "purple", "green", "red"] | None = None
+    notes: str | None = None
+    is_ai_scheduled: bool | None = None
+    goal_id: str | None = None
+
+
+def _serialize_event(doc: dict[str, Any]) -> dict[str, Any]:
+    """Turn datetime fields into ISO strings for JSON transport."""
+    out = {k: v for k, v in doc.items() if k != "_id"}
+    for key in ("start", "end", "created_at", "updated_at"):
+        v = out.get(key)
+        if isinstance(v, datetime):
+            out[key] = v.isoformat()
+    return out
+
+
+@app.get("/api/calendar/events")
+async def list_calendar_events(
+    user: User = Depends(get_current_user),
+    start: datetime | None = None,
+    end: datetime | None = None,
+):
+    query: dict[str, Any] = {"user_id": user.user_id}
+    # Range filter: events that overlap [start, end)
+    if start and end:
+        query["$and"] = [{"start": {"$lt": end}}, {"end": {"$gt": start}}]
+    elif start:
+        query["end"] = {"$gt": start}
+    elif end:
+        query["start"] = {"$lt": end}
+    cursor = db.calendar_events.find(query, {"_id": 0}).sort("start", 1)
+    return [_serialize_event(doc) async for doc in cursor]
+
+
+@app.post("/api/calendar/events")
+async def create_calendar_event(
+    body: CalendarEventCreate, user: User = Depends(get_current_user),
+):
+    if body.end <= body.start:
+        raise HTTPException(status_code=400, detail="end must be after start")
+    event_id = f"evt_cal_{uuid.uuid4().hex[:10]}"
+    doc = {
+        "event_id": event_id,
+        "user_id": user.user_id,
+        "title": body.title.strip() or "Untitled event",
+        "start": body.start,
+        "end": body.end,
+        "color": body.color,
+        "notes": body.notes,
+        "is_ai_scheduled": body.is_ai_scheduled,
+        "goal_id": body.goal_id,
+        "created_at": _now(),
+        "updated_at": _now(),
+    }
+    await db.calendar_events.insert_one(doc)
+    await _log_activity(
+        user.user_id, "calendar.event_created",
+        f"Scheduled '{doc['title']}' on {body.start.date().isoformat()}",
+        {"event_id": event_id, "goal_id": body.goal_id},
+    )
+    saved = await db.calendar_events.find_one({"event_id": event_id}, {"_id": 0})
+    return _serialize_event(saved)
+
+
+@app.patch("/api/calendar/events/{event_id}")
+async def update_calendar_event(
+    event_id: str, body: CalendarEventUpdate, user: User = Depends(get_current_user),
+):
+    updates = {k: v for k, v in body.model_dump(exclude_unset=True).items() if v is not None}
+    if not updates:
+        raise HTTPException(status_code=400, detail="No fields to update")
+    # Only allow range validation if both new start AND new end are present; otherwise,
+    # pull the existing event to validate.
+    if "start" in updates or "end" in updates:
+        existing = await db.calendar_events.find_one(
+            {"event_id": event_id, "user_id": user.user_id}, {"_id": 0, "start": 1, "end": 1},
+        )
+        if not existing:
+            raise HTTPException(status_code=404, detail="Event not found")
+        new_start = updates.get("start", existing["start"])
+        new_end = updates.get("end", existing["end"])
+        if new_end <= new_start:
+            raise HTTPException(status_code=400, detail="end must be after start")
+    updates["updated_at"] = _now()
+    result = await db.calendar_events.update_one(
+        {"event_id": event_id, "user_id": user.user_id}, {"$set": updates},
+    )
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Event not found")
+    saved = await db.calendar_events.find_one({"event_id": event_id}, {"_id": 0})
+    return _serialize_event(saved)
+
+
+@app.delete("/api/calendar/events/{event_id}")
+async def delete_calendar_event(event_id: str, user: User = Depends(get_current_user)):
+    result = await db.calendar_events.delete_one(
+        {"event_id": event_id, "user_id": user.user_id},
+    )
+    if result.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Event not found")
+    await _log_activity(
+        user.user_id, "calendar.event_deleted",
+        f"Deleted calendar event {event_id}",
+        {"event_id": event_id},
+    )
+    return {"ok": True}
+
+
+# =====================================================================
 # PATH TASK TOGGLE + MOOD
 # =====================================================================
 
@@ -1640,3 +1769,176 @@ async def _execute_tool_calls(
     clean = TOOL_CALL_PATTERN.sub("", raw_reply).strip()
     clean = re.sub(r"\n{3,}", "\n\n", clean)
     return clean, results
+
+
+# =====================================================================
+# EVENING CHECK-IN (proactive coaching)
+# =====================================================================
+#
+# Every day between 20:00–21:00 UTC, for every user with an active path
+# whose Day-1/today micro-task is still incomplete, Claude generates a
+# short 2–3 sentence nudge and persists it as an assistant chat_message.
+# Idempotency is per-user-per-date via the `user_state` collection.
+
+EVENING_CHECKIN_PROMPT = """You are the MentorMeUp Coach sending an end-of-day check-in to {user_name}.
+The user hasn't completed today's task yet. It's evening. Send ONE message: 2–3
+short, warm, direct sentences. No action tags today — this is a nudge, not a
+command. Reference the specific task title and, if possible, their why_today
+line. End with a concrete next sentence (either an encouragement to do it now,
+or an offer to reschedule to tomorrow morning).
+
+Today's task: {task_title} ({task_duration} min)
+Why today: {task_why}
+Their goal: {goal_title}
+Their path context: {context}
+
+Rules:
+- Max 3 sentences. No bullet lists. No markdown headings. No emoji spam.
+- Do not pretend to mark things done. Never emit <action> tags.
+- Sound like a friend who remembers what they're training for.
+
+Write the nudge now."""
+
+
+async def _generate_evening_nudge(user_doc: dict[str, Any], path_doc: dict[str, Any], task_doc: dict[str, Any]) -> str | None:
+    """Call Claude to write the evening nudge. Returns the text or None on failure."""
+    try:
+        context_parts = []
+        summary = path_doc.get("intake_summary", {})
+        if summary.get("motivation"):
+            context_parts.append(f"Motivation: {summary['motivation']}")
+        if summary.get("preferred_time_of_day"):
+            context_parts.append(f"Preferred time of day: {summary['preferred_time_of_day']}")
+        context_parts.append(f"Progress: {path_doc.get('progress', 0)}%")
+        context = " · ".join(context_parts) or "No extra context."
+
+        prompt = EVENING_CHECKIN_PROMPT.format(
+            user_name=user_doc.get("name", "there"),
+            task_title=task_doc.get("title", "your task"),
+            task_duration=task_doc.get("duration_minutes", 10),
+            task_why=task_doc.get("why_today", ""),
+            goal_title=path_doc.get("goal_title", "your goal"),
+            context=context,
+        )
+        chat = LlmChat(
+            api_key=EMERGENT_LLM_KEY,
+            session_id=f"evening:{user_doc['user_id']}:{uuid.uuid4().hex[:6]}",
+            system_message=prompt,
+        ).with_model(COACH_MODEL_PROVIDER, COACH_MODEL_NAME)
+        reply = await chat.send_message(UserMessage(text="Send the nudge."))
+        return reply.strip() if reply else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+async def _process_evening_checkin_for_user(user_doc: dict[str, Any]) -> bool:
+    """Run the evening check-in for one user. Returns True if a nudge was sent."""
+    user_id = user_doc["user_id"]
+    today = _now().date().isoformat()
+    state = await db.user_state.find_one({"user_id": user_id}, {"_id": 0}) or {}
+    if state.get("last_evening_checkin_date") == today:
+        return False
+
+    # Find the user's active goal + path.
+    goal = await db.goals.find_one(
+        {"user_id": user_id, "status": "active"}, {"_id": 0},
+    )
+    if not goal or not goal.get("path_id"):
+        return False
+    path = await db.paths.find_one({"path_id": goal["path_id"]}, {"_id": 0})
+    if not path:
+        return False
+
+    # Find today's incomplete task (same logic as /today endpoint).
+    today_task: dict[str, Any] | None = None
+    for ph in path["phases"]:
+        for ms in ph["milestones"]:
+            for st in ms["steps"]:
+                for t in st["micro_tasks"]:
+                    if not t.get("completed"):
+                        today_task = t
+                        break
+                if today_task:
+                    break
+            if today_task:
+                break
+        if today_task:
+            break
+    if not today_task:
+        return False  # Nothing to nudge about.
+
+    nudge = await _generate_evening_nudge(user_doc, path, today_task)
+    if not nudge:
+        return False
+
+    msg_id = f"msg_{uuid.uuid4().hex[:12]}"
+    await db.chat_messages.insert_one({
+        "message_id": msg_id,
+        "user_id": user_id,
+        "role": "assistant",
+        "content": nudge,
+        "actions": [],
+        "kind": "evening_checkin",
+        "created_at": _now(),
+    })
+    await db.user_state.update_one(
+        {"user_id": user_id},
+        {"$set": {"last_evening_checkin_date": today, "updated_at": _now()}},
+        upsert=True,
+    )
+    await _log_activity(
+        user_id, "coach.evening_checkin",
+        f"Evening nudge sent for '{today_task['title']}'",
+        {"task_id": today_task.get("task_id"), "message_id": msg_id},
+    )
+    return True
+
+
+async def run_evening_checkins() -> dict[str, int]:
+    """Scan all users and send the evening check-in where due. Returns counts."""
+    cursor = db.users.find({}, {"_id": 0})
+    sent = 0
+    scanned = 0
+    async for user_doc in cursor:
+        scanned += 1
+        try:
+            if await _process_evening_checkin_for_user(user_doc):
+                sent += 1
+        except Exception:  # noqa: BLE001
+            continue
+    return {"scanned": scanned, "sent": sent}
+
+
+@app.post("/api/coach/evening-checkin/run")
+async def trigger_evening_checkin(user: User = Depends(get_current_user)):
+    """Manual trigger for dev/testing. Runs the check-in for all users right now.
+
+    In production the background loop handles this automatically at 20:00 UTC.
+    """
+    result = await run_evening_checkins()
+    return {"ok": True, **result}
+
+
+# ----- Background scheduler -------------------------------------------------
+
+CHECKIN_LOOP_INTERVAL_SECONDS = 300  # 5 minutes
+CHECKIN_WINDOW_START_HOUR = 20  # 20:00 UTC
+CHECKIN_WINDOW_END_HOUR = 21  # up to 21:00 UTC
+
+
+async def _evening_checkin_loop() -> None:
+    import sys
+    while True:
+        try:
+            hour = _now().hour
+            if CHECKIN_WINDOW_START_HOUR <= hour < CHECKIN_WINDOW_END_HOUR:
+                result = await run_evening_checkins()
+                print(f"[evening_checkin] {result}", file=sys.stderr, flush=True)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[evening_checkin] error: {exc}", file=sys.stderr, flush=True)
+        await asyncio.sleep(CHECKIN_LOOP_INTERVAL_SECONDS)
+
+
+@app.on_event("startup")
+async def _start_background_tasks() -> None:
+    asyncio.create_task(_evening_checkin_loop())

@@ -1,28 +1,37 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { motion, AnimatePresence } from "motion/react";
 import {
   Search,
   Plus,
   ChevronDown,
   ChevronRight,
-  Share2,
-  Edit3,
-  Pin,
-  Check,
-  Archive,
   Sparkles,
   User,
   Menu,
   X,
+  Trash2,
 } from "lucide-react";
 import Link from "next/link";
 import { SidebarNav } from "@/components/sidebar-nav";
 import { useGoals } from "@/contexts/goals-context";
 import { useTheme } from "@/contexts/theme-context";
+import { api } from "@/lib/api";
+import { logActivity } from "@/lib/activity";
 
-// Types
+interface ApiNote {
+  note_id: string;
+  user_id: string;
+  goal_id: string | null;
+  title: string;
+  content: string;
+  tags: string[];
+  created_at: string;
+  updated_at: string;
+}
+
+// UI-layer note shape
 interface Note {
   id: string;
   title: string;
@@ -30,86 +39,22 @@ interface Note {
   type: "ai" | "user";
   goalId: string;
   goalTitle: string;
-  content: NoteBlock[];
-  pinned?: boolean;
-  archived?: boolean;
+  content: string;
 }
 
-interface NoteBlock {
-  type: "callout" | "heading" | "paragraph" | "bullets" | "todo" | "divider" | "tasks";
-  content?: string;
-  items?: { text: string; checked?: boolean }[];
-  variant?: "insight" | "warning" | "tip";
-}
+const UNASSIGNED_BUCKET = "__unassigned__";
 
-// Sample notes data
-const sampleNotes: Note[] = [
-  {
-    id: "1",
-    title: "Session Recap — Week 3 Weigh-In",
-    date: "19 Apr 2026",
-    type: "ai",
-    goalId: "goal-1",
-    goalTitle: "Lose 15kg",
-    pinned: true,
-    content: [
-      {
-        type: "callout",
-        variant: "insight",
-        content: "Coach insight: Your consistency rate is 71% — above average for week 3. The trend is moving in the right direction.",
-      },
-      { type: "heading", content: "What happened this week" },
-      {
-        type: "paragraph",
-        content: "This week marked your third official weigh-in since starting the program. You logged 5 out of 7 days consistently, completed 4 morning walks, and tracked your meals with 80% accuracy. The scale showed a 0.8kg drop, bringing your total loss to 2.3kg.",
-      },
-    ],
-  },
-  {
-    id: "2",
-    title: "My thoughts on the first month",
-    date: "15 Apr 2026",
-    type: "user",
-    goalId: "goal-1",
-    goalTitle: "Lose 15kg",
-    content: [
-      {
-        type: "paragraph",
-        content: "Feeling more confident than I expected at this point. The morning routine is actually becoming automatic now.",
-      },
-    ],
-  },
-  {
-    id: "3",
-    title: "Session Recap — Initial Assessment",
-    date: "01 Apr 2026",
-    type: "ai",
-    goalId: "goal-1",
-    goalTitle: "Lose 15kg",
-    content: [
-      {
-        type: "callout",
-        variant: "insight",
-        content: "Starting point established. Your TDEE is approximately 2,400 calories. We will target a 500 calorie deficit.",
-      },
-    ],
-  },
-  {
-    id: "4",
-    title: "Portfolio Review — Week 2",
-    date: "12 Apr 2026",
-    type: "ai",
-    goalId: "goal-2",
-    goalTitle: "Start Freelancing",
-    content: [
-      {
-        type: "callout",
-        variant: "tip",
-        content: "Your portfolio is 60% complete. Focus on adding 2 more case studies this week.",
-      },
-    ],
-  },
-];
+function formatDate(iso: string): string {
+  try {
+    return new Date(iso).toLocaleDateString("en-US", {
+      day: "2-digit",
+      month: "short",
+      year: "numeric",
+    });
+  } catch {
+    return iso;
+  }
+}
 
 type FilterType = "all" | "ai" | "user";
 
@@ -117,35 +62,110 @@ export default function NotesPage() {
   const { goals } = useGoals();
   const { theme } = useTheme();
   const isDark = theme === "dark";
-  const [selectedNoteId, setSelectedNoteId] = useState<string>("1");
+
+  const [rawNotes, setRawNotes] = useState<ApiNote[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [selectedNoteId, setSelectedNoteId] = useState<string | null>(null);
   const [filter, setFilter] = useState<FilterType>("all");
   const [searchQuery, setSearchQuery] = useState("");
-  const [expandedGoals, setExpandedGoals] = useState<string[]>(["goal-1", "goal-2"]);
-  const [showArchived, setShowArchived] = useState(false);
+  const [expandedGoals, setExpandedGoals] = useState<string[]>([]);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
+  const [deleting, setDeleting] = useState(false);
 
-  const selectedNote = sampleNotes.find((n) => n.id === selectedNoteId);
+  const goalTitleById = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const g of goals) map.set(g.id, g.title);
+    return map;
+  }, [goals]);
 
-  const filteredNotes = sampleNotes.filter((note) => {
-    if (note.archived && !showArchived) return false;
+  const loadNotes = async () => {
+    setLoading(true);
+    try {
+      const list = await api.get<ApiNote[]>("/api/notes");
+      setRawNotes(list);
+    } catch {
+      setRawNotes([]);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    void loadNotes();
+  }, []);
+
+  const notes: Note[] = useMemo(
+    () =>
+      rawNotes.map((n) => ({
+        id: n.note_id,
+        title: n.title || "Untitled note",
+        date: formatDate(n.created_at),
+        type: n.tags?.includes("from-coach") ? "ai" : "user",
+        goalId: n.goal_id ?? UNASSIGNED_BUCKET,
+        goalTitle: n.goal_id
+          ? goalTitleById.get(n.goal_id) ?? "Unknown goal"
+          : "Unassigned",
+        content: n.content,
+      })),
+    [rawNotes, goalTitleById],
+  );
+
+  const filteredNotes = notes.filter((note) => {
     if (filter === "ai" && note.type !== "ai") return false;
     if (filter === "user" && note.type !== "user") return false;
-    if (searchQuery && !note.title.toLowerCase().includes(searchQuery.toLowerCase())) return false;
+    if (
+      searchQuery &&
+      !(
+        note.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
+        note.content.toLowerCase().includes(searchQuery.toLowerCase())
+      )
+    ) {
+      return false;
+    }
     return true;
   });
 
-  const notesByGoal = filteredNotes.reduce((acc, note) => {
-    if (!acc[note.goalId]) {
-      acc[note.goalId] = { title: note.goalTitle, notes: [] };
+  const notesByGoal = filteredNotes.reduce(
+    (acc, note) => {
+      if (!acc[note.goalId]) {
+        acc[note.goalId] = { title: note.goalTitle, notes: [] };
+      }
+      acc[note.goalId].notes.push(note);
+      return acc;
+    },
+    {} as Record<string, { title: string; notes: Note[] }>,
+  );
+
+  // Auto-expand all goal buckets that have notes the first time a non-empty
+  // list loads, and auto-select the first note if nothing selected.
+  useEffect(() => {
+    if (expandedGoals.length === 0 && Object.keys(notesByGoal).length > 0) {
+      setExpandedGoals(Object.keys(notesByGoal));
     }
-    acc[note.goalId].notes.push(note);
-    return acc;
-  }, {} as Record<string, { title: string; notes: Note[] }>);
+    if (!selectedNoteId && filteredNotes.length > 0) {
+      setSelectedNoteId(filteredNotes[0].id);
+    }
+  }, [notesByGoal, filteredNotes, expandedGoals.length, selectedNoteId]);
+
+  const selectedNote = filteredNotes.find((n) => n.id === selectedNoteId) ?? null;
 
   const toggleGoalExpand = (goalId: string) => {
     setExpandedGoals((prev) =>
-      prev.includes(goalId) ? prev.filter((id) => id !== goalId) : [...prev, goalId]
+      prev.includes(goalId) ? prev.filter((id) => id !== goalId) : [...prev, goalId],
     );
+  };
+
+  const handleDelete = async (noteId: string) => {
+    if (deleting) return;
+    setDeleting(true);
+    try {
+      await api.delete(`/api/notes/${noteId}`);
+      logActivity("note.deleted", `Deleted note`, { note_id: noteId });
+      setRawNotes((prev) => prev.filter((n) => n.note_id !== noteId));
+      setSelectedNoteId((prev) => (prev === noteId ? null : prev));
+    } finally {
+      setDeleting(false);
+    }
   };
 
   return (
@@ -312,7 +332,6 @@ export default function NotesPage() {
                                     >
                                       {note.title}
                                     </span>
-                                    {note.pinned && <Pin className="w-3 h-3 text-[#F5C518] flex-shrink-0" />}
                                   </div>
                                   <div className="flex items-center gap-2">
                                     <span className={`font-mono text-[10px] ${isDark ? "text-[rgba(255,255,255,0.35)]" : "text-[rgba(0,0,0,0.35)]"}`}>
@@ -337,17 +356,15 @@ export default function NotesPage() {
                     ))}
                   </div>
 
-                  {/* Archived Notes */}
-                  <div className={`border-t ${isDark ? "border-[rgba(255,255,255,0.04)]" : "border-[rgba(0,0,0,0.06)]"} px-4 py-3`}>
-                    <button
-                      onClick={() => setShowArchived(!showArchived)}
-                      className={`flex items-center gap-2 ${isDark ? "text-[rgba(255,255,255,0.35)] hover:text-[rgba(255,255,255,0.6)]" : "text-[rgba(0,0,0,0.35)] hover:text-[rgba(0,0,0,0.6)]"} transition-colors`}
-                    >
-                      <Archive className="w-4 h-4" />
-                      <span className="font-mono text-xs">Archived Notes</span>
-                      {showArchived ? <ChevronDown className="w-3 h-3 ml-auto" /> : <ChevronRight className="w-3 h-3 ml-auto" />}
-                    </button>
-                  </div>
+                  {/* Empty state inside sidebar when no notes */}
+                  {!loading && filteredNotes.length === 0 && (
+                    <div className="px-4 py-6 text-center">
+                      <p className={`font-mono text-xs ${isDark ? "text-[rgba(255,255,255,0.4)]" : "text-[rgba(0,0,0,0.4)]"}`}>
+                        No notes yet. Hit &quot;New Note&quot; above or ask your coach
+                        to save one for you.
+                      </p>
+                    </div>
+                  )}
                 </div>
               </motion.aside>
             )}
@@ -404,67 +421,33 @@ export default function NotesPage() {
                   </div>
 
                   <div className="flex items-center gap-2">
-                    {[
-                      { icon: Share2, label: "Share" },
-                      { icon: Edit3, label: "Edit" },
-                      { icon: Pin, label: "Pin" },
-                    ].map(({ icon: Icon, label }) => (
-                      <motion.button
-                        key={label}
-                        whileHover={{ scale: 1.05 }}
-                        whileTap={{ scale: 0.95 }}
-                        className={`p-2.5 rounded-xl ${isDark ? "bg-[rgba(255,255,255,0.04)] border-[rgba(255,255,255,0.06)] text-[rgba(255,255,255,0.5)] hover:text-[#F5C518]" : "bg-[rgba(0,0,0,0.03)] border-[rgba(0,0,0,0.06)] text-[rgba(0,0,0,0.5)] hover:text-[#D4A912]"} border transition-colors`}
-                      >
-                        <Icon className="w-4 h-4" />
-                      </motion.button>
-                    ))}
+                    <motion.button
+                      whileHover={{ scale: 1.05 }}
+                      whileTap={{ scale: 0.95 }}
+                      onClick={() => handleDelete(selectedNote.id)}
+                      disabled={deleting}
+                      data-testid="note-delete-button"
+                      className={`p-2.5 rounded-xl border transition-colors disabled:opacity-50 ${
+                        isDark
+                          ? "bg-[rgba(255,255,255,0.04)] border-[rgba(255,255,255,0.06)] text-[rgba(255,255,255,0.5)] hover:text-red-400"
+                          : "bg-[rgba(0,0,0,0.03)] border-[rgba(0,0,0,0.06)] text-[rgba(0,0,0,0.5)] hover:text-red-500"
+                      }`}
+                      aria-label="Delete note"
+                    >
+                      <Trash2 className="w-4 h-4" />
+                    </motion.button>
                   </div>
                 </div>
 
                 {/* Note Content */}
-                <div className="space-y-4">
-                  {selectedNote.content.map((block, index) => {
-                    const blockKey = `${selectedNote.id}-block-${index}-${block.type}`;
-                    if (block.type === "callout") {
-                      return (
-                        <div
-                          key={blockKey}
-                          className={`p-4 rounded-xl border-l-4 ${
-                            block.variant === "insight"
-                              ? `border-l-[#00D4FF] ${isDark ? "bg-[rgba(0,212,255,0.08)]" : "bg-[rgba(0,212,255,0.06)]"}`
-                              : block.variant === "tip"
-                              ? `border-l-[#F5C518] ${isDark ? "bg-[rgba(245,197,24,0.08)]" : "bg-[rgba(245,197,24,0.06)]"}`
-                              : `border-l-orange-500 ${isDark ? "bg-[rgba(249,115,22,0.08)]" : "bg-[rgba(249,115,22,0.06)]"}`
-                          }`}
-                        >
-                          <p className={`font-mono text-sm ${isDark ? "text-[rgba(255,255,255,0.85)]" : "text-[rgba(0,0,0,0.75)]"}`}>
-                            {block.content}
-                          </p>
-                        </div>
-                      );
-                    }
-                    if (block.type === "heading") {
-                      return (
-                        <h3 key={blockKey} className={`font-sans font-semibold text-lg ${isDark ? "text-white" : "text-[#1A1D21]"} mt-6`}>
-                          {block.content}
-                        </h3>
-                      );
-                    }
-                    if (block.type === "paragraph") {
-                      return (
-                        <p key={blockKey} className={`font-sans text-sm leading-relaxed ${isDark ? "text-[rgba(255,255,255,0.7)]" : "text-[rgba(0,0,0,0.7)]"}`}>
-                          {block.content}
-                        </p>
-                      );
-                    }
-                    return null;
-                  })}
+                <div className="space-y-4" data-testid="note-content">
+                  {renderPlainContent(selectedNote.content, isDark, selectedNote.id)}
                 </div>
               </motion.div>
             ) : (
               <div className="flex items-center justify-center h-full">
                 <p className={`font-mono text-sm ${isDark ? "text-[rgba(255,255,255,0.4)]" : "text-[rgba(0,0,0,0.4)]"}`}>
-                  Select a note to view
+                  {loading ? "Loading notes…" : "Select a note to view"}
                 </p>
               </div>
             )}
@@ -473,4 +456,117 @@ export default function NotesPage() {
       </main>
     </div>
   );
+}
+
+function renderPlainContent(content: string, isDark: boolean, noteId: string) {
+  const lines = content.split("\n");
+  const nodes: React.ReactNode[] = [];
+  let para: string[] = [];
+  const flushPara = (key: string) => {
+    if (para.length === 0) return;
+    const text = para.join(" ").trim();
+    if (text) {
+      nodes.push(
+        <p
+          key={key}
+          className={`font-sans text-sm leading-relaxed whitespace-pre-wrap ${isDark ? "text-[rgba(255,255,255,0.75)]" : "text-[rgba(0,0,0,0.75)]"}`}
+        >
+          {text}
+        </p>,
+      );
+    }
+    para = [];
+  };
+  lines.forEach((raw, i) => {
+    const line = raw.trimEnd();
+    const key = `${noteId}-l-${i}`;
+    if (!line.trim()) {
+      flushPara(`${key}-p`);
+      return;
+    }
+    if (line.startsWith("# ")) {
+      flushPara(`${key}-p`);
+      nodes.push(
+        <h2 key={key} className={`font-sans font-bold text-xl mt-4 ${isDark ? "text-white" : "text-[#1A1D21]"}`}>
+          {line.slice(2)}
+        </h2>,
+      );
+      return;
+    }
+    if (line.startsWith("## ")) {
+      flushPara(`${key}-p`);
+      nodes.push(
+        <h3 key={key} className={`font-sans font-semibold text-lg mt-4 ${isDark ? "text-white" : "text-[#1A1D21]"}`}>
+          {line.slice(3)}
+        </h3>,
+      );
+      return;
+    }
+    if (line.startsWith("> ")) {
+      flushPara(`${key}-p`);
+      nodes.push(
+        <div
+          key={key}
+          className={`p-4 rounded-xl border-l-4 border-l-[#F5C518] ${
+            isDark ? "bg-[rgba(245,197,24,0.08)]" : "bg-[rgba(245,197,24,0.06)]"
+          }`}
+        >
+          <p className={`font-mono text-sm ${isDark ? "text-[rgba(255,255,255,0.85)]" : "text-[rgba(0,0,0,0.8)]"}`}>
+            {line.slice(2)}
+          </p>
+        </div>,
+      );
+      return;
+    }
+    if (line === "---") {
+      flushPara(`${key}-p`);
+      nodes.push(
+        <hr
+          key={key}
+          className={isDark ? "border-[rgba(255,255,255,0.08)]" : "border-[rgba(0,0,0,0.08)]"}
+        />,
+      );
+      return;
+    }
+    if (/^[-*]\s+/.test(line)) {
+      flushPara(`${key}-p`);
+      nodes.push(
+        <li
+          key={key}
+          className={`ml-6 list-disc font-sans text-sm leading-relaxed ${isDark ? "text-[rgba(255,255,255,0.75)]" : "text-[rgba(0,0,0,0.75)]"}`}
+        >
+          {line.replace(/^[-*]\s+/, "")}
+        </li>,
+      );
+      return;
+    }
+    if (/^\[\s?[xX ]?\]\s+/.test(line)) {
+      flushPara(`${key}-p`);
+      const checked = /\[[xX]\]/.test(line);
+      nodes.push(
+        <div key={key} className="flex items-start gap-2">
+          <span className={`mt-0.5 text-sm ${isDark ? "text-[#F5C518]" : "text-[#D4A912]"}`}>
+            {checked ? "☑" : "☐"}
+          </span>
+          <span
+            className={`font-sans text-sm leading-relaxed ${
+              checked
+                ? isDark
+                  ? "text-[rgba(255,255,255,0.5)] line-through"
+                  : "text-[rgba(0,0,0,0.45)] line-through"
+                : isDark
+                  ? "text-[rgba(255,255,255,0.75)]"
+                  : "text-[rgba(0,0,0,0.75)]"
+            }`}
+          >
+            {line.replace(/^\[\s?[xX ]?\]\s+/, "")}
+          </span>
+        </div>,
+      );
+      return;
+    }
+    para.push(line);
+  });
+  flushPara(`${noteId}-p-end`);
+  return nodes;
 }

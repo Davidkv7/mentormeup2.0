@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useMemo } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { motion, AnimatePresence } from "motion/react";
 import {
   addWeeks,
@@ -10,8 +10,6 @@ import {
   startOfWeek,
   endOfWeek,
   addDays,
-  setHours,
-  setMinutes,
 } from "date-fns";
 import { ChevronLeft, ChevronRight, Plus, Menu, X, Calendar as CalendarIcon } from "lucide-react";
 import { MiniCalendar } from "@/components/calendar/mini-calendar";
@@ -21,50 +19,35 @@ import { NewBlockModal } from "@/components/calendar/new-block-modal";
 import type { CalendarEvent } from "@/components/calendar/event-block";
 import { SidebarNav } from "@/components/sidebar-nav";
 import { useTheme } from "@/contexts/theme-context";
+import { api } from "@/lib/api";
+import { logActivity } from "@/lib/activity";
 
-const createSampleEvents = (): CalendarEvent[] => {
-  const today = new Date();
-  const weekStart = startOfWeek(today);
+interface ApiCalendarEvent {
+  event_id: string;
+  title: string;
+  start: string;
+  end: string;
+  color: CalendarEvent["color"];
+  notes: string | null;
+  is_ai_scheduled: boolean;
+  goal_id: string | null;
+}
 
-  return [
-    {
-      id: "1",
-      title: "Morning Trade Review",
-      start: setMinutes(setHours(addDays(weekStart, 1), 8), 0),
-      end: setMinutes(setHours(addDays(weekStart, 1), 9), 0),
-      color: "cyan",
-      isAIScheduled: true,
-    },
-    {
-      id: "2",
-      title: "AI Coach Session",
-      start: setMinutes(setHours(addDays(weekStart, 1), 10), 0),
-      end: setMinutes(setHours(addDays(weekStart, 1), 11), 30),
-      color: "gold",
-      isAIScheduled: true,
-    },
-    {
-      id: "3",
-      title: "Deep Work: Strategy Study",
-      start: setMinutes(setHours(addDays(weekStart, 2), 9), 0),
-      end: setMinutes(setHours(addDays(weekStart, 2), 10), 0),
-      color: "green",
-      isAIScheduled: true,
-    },
-    {
-      id: "4",
-      title: "Mentor Call — John Rivera",
-      start: setMinutes(setHours(addDays(weekStart, 3), 14), 0),
-      end: setMinutes(setHours(addDays(weekStart, 3), 15), 0),
-      color: "purple",
-      isAIScheduled: false,
-    },
-  ];
-};
+function toClientEvent(e: ApiCalendarEvent): CalendarEvent {
+  return {
+    id: e.event_id,
+    title: e.title,
+    start: new Date(e.start),
+    end: new Date(e.end),
+    color: e.color,
+    notes: e.notes ?? undefined,
+    isAIScheduled: e.is_ai_scheduled,
+  };
+}
 
 const initialLayers = [
   { id: "gold" as CalendarLayerType, name: "AI Coaching Sessions", color: "#F5C518", enabled: true },
-  { id: "cyan" as CalendarLayerType, name: "Trading Review Blocks", color: "#00D4FF", enabled: true },
+  { id: "cyan" as CalendarLayerType, name: "Training Blocks", color: "#00D4FF", enabled: true },
   { id: "purple" as CalendarLayerType, name: "Human Mentor Calls", color: "#A855F7", enabled: true },
   { id: "green" as CalendarLayerType, name: "Deep Work / Study", color: "#22C55E", enabled: true },
   { id: "red" as CalendarLayerType, name: "Risk Review (flagged)", color: "#EF4444", enabled: true },
@@ -77,7 +60,7 @@ export default function CalendarPage() {
   const isDark = theme === "dark";
   const [selectedDate, setSelectedDate] = useState(new Date());
   const [currentView, setCurrentView] = useState<ViewType>("week");
-  const [events, setEvents] = useState<CalendarEvent[]>(createSampleEvents);
+  const [events, setEvents] = useState<CalendarEvent[]>([]);
   const [layers, setLayers] = useState(initialLayers);
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [modalDate, setModalDate] = useState<Date | undefined>();
@@ -85,6 +68,29 @@ export default function CalendarPage() {
   const [editEvent, setEditEvent] = useState<CalendarEvent | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
+
+  const rangeKey = useMemo(
+    () => `${startOfWeek(selectedDate).toISOString()}_${endOfWeek(selectedDate).toISOString()}`,
+    [selectedDate],
+  );
+
+  const loadEvents = useCallback(async () => {
+    const start = startOfWeek(selectedDate).toISOString();
+    const end = endOfWeek(selectedDate).toISOString();
+    try {
+      const list = await api.get<ApiCalendarEvent[]>(
+        `/api/calendar/events?start=${encodeURIComponent(start)}&end=${encodeURIComponent(end)}`,
+      );
+      setEvents(list.map(toClientEvent));
+    } catch {
+      setEvents([]);
+    }
+  }, [selectedDate]);
+
+  useEffect(() => {
+    void loadEvents();
+    // loadEvents is stable w.r.t. selectedDate change via rangeKey.
+  }, [loadEvents, rangeKey]);
 
   const datesWithEvents = useMemo(() => {
     return events.map((e) => e.start);
@@ -132,19 +138,51 @@ export default function CalendarPage() {
     setIsModalOpen(true);
   };
 
-  const handleSaveEvent = (eventData: Omit<CalendarEvent, "id">) => {
-    if (editEvent) {
-      setEvents((prev) =>
-        prev.map((e) => (e.id === editEvent.id ? { ...eventData, id: editEvent.id } : e))
-      );
-    } else {
-      setEvents((prev) => [
-        ...prev,
-        { ...eventData, id: `event-${Date.now()}` },
-      ]);
+  const handleSaveEvent = async (eventData: Omit<CalendarEvent, "id">) => {
+    const payload = {
+      title: eventData.title,
+      start: eventData.start.toISOString(),
+      end: eventData.end.toISOString(),
+      color: eventData.color,
+      notes: eventData.notes ?? null,
+      is_ai_scheduled: eventData.isAIScheduled ?? false,
+    };
+    try {
+      if (editEvent) {
+        const updated = await api.patch<ApiCalendarEvent>(
+          `/api/calendar/events/${editEvent.id}`,
+          payload,
+        );
+        setEvents((prev) =>
+          prev.map((e) => (e.id === editEvent.id ? toClientEvent(updated) : e)),
+        );
+        logActivity("calendar.event_updated", `Updated '${eventData.title}'`, {
+          event_id: editEvent.id,
+        });
+      } else {
+        const created = await api.post<ApiCalendarEvent>("/api/calendar/events", payload);
+        setEvents((prev) => [...prev, toClientEvent(created)]);
+        logActivity("calendar.event_created", `Scheduled '${eventData.title}'`, {
+          event_id: created.event_id,
+        });
+      }
+      setIsModalOpen(false);
+      setEditEvent(null);
+    } catch {
+      // Keep modal open on error; nothing else surfaces here yet.
     }
-    setIsModalOpen(false);
-    setEditEvent(null);
+  };
+
+  const handleDeleteEvent = async (eventId: string) => {
+    try {
+      await api.delete(`/api/calendar/events/${eventId}`);
+      setEvents((prev) => prev.filter((e) => e.id !== eventId));
+      logActivity("calendar.event_deleted", `Deleted calendar event`, { event_id: eventId });
+      setIsModalOpen(false);
+      setEditEvent(null);
+    } catch {
+      /* swallow */
+    }
   };
 
   const weekRange = `${format(startOfWeek(selectedDate), "MMM d")} – ${format(
@@ -352,6 +390,7 @@ export default function CalendarPage() {
             setEditEvent(null);
           }}
           onSave={handleSaveEvent}
+          onDelete={handleDeleteEvent}
           initialDate={modalDate}
           initialHour={modalHour}
           editEvent={editEvent}

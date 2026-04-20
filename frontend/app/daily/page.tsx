@@ -12,6 +12,7 @@ import { useGoals } from "@/contexts/goals-context";
 import { useAuth } from "@/contexts/auth-context";
 import { useTheme } from "@/contexts/theme-context";
 import { api, ApiError } from "@/lib/api";
+import { logActivity } from "@/lib/activity";
 
 type Mood = "great" | "ok" | "drained";
 
@@ -68,6 +69,17 @@ export default function DailyFocusPage() {
     try {
       const res = await api.get<TodayResponse>(`/api/paths/${goalId}/today`);
       setToday(res);
+      // Struggle signal: log that the user viewed today's task without
+      // (yet) marking it complete. Repeated task.viewed events on the same
+      // task_id without a matching task.completed tells the coach the user
+      // may be stuck.
+      if (res.task && !res.task.completed) {
+        logActivity("task.viewed", `Viewed today's task: ${res.task.title}`, {
+          task_id: res.task.task_id,
+          goal_id: goalId,
+          duration_minutes: res.task.duration_minutes,
+        });
+      }
     } catch (err) {
       if (err instanceof ApiError && err.status === 404) {
         setError("no_path");
@@ -101,6 +113,8 @@ export default function DailyFocusPage() {
     async (mood: Mood) => {
       if (!goalId || !today?.task || mutating) return;
       setMutating(true);
+      const taskId = today.task.task_id;
+      const taskTitle = today.task.title;
       // Optimistic update
       setToday((prev) =>
         prev && prev.task
@@ -108,8 +122,13 @@ export default function DailyFocusPage() {
           : prev,
       );
       try {
-        await api.post(`/api/paths/${goalId}/tasks/${today.task.task_id}/toggle`, {
+        await api.post(`/api/paths/${goalId}/tasks/${taskId}/toggle`, {
           mood_today: mood,
+        });
+        logActivity("mood.logged", `Logged mood '${mood}' on ${taskTitle}`, {
+          task_id: taskId,
+          goal_id: goalId,
+          mood,
         });
       } finally {
         setMutating(false);

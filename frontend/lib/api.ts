@@ -115,12 +115,23 @@ export interface ApiGoal {
   created_at: string;
 }
 
+export interface ApiCoachAction {
+  tool: string;
+  ok: boolean;
+  summary: string;
+  task_id?: string;
+  note_id?: string;
+  mood?: string;
+  scheduled_date?: string;
+}
+
 export interface ApiChatMessage {
   message_id: string;
   user_id: string;
   role: "user" | "assistant";
   content: string;
   created_at: string;
+  actions?: ApiCoachAction[];
 }
 
 export interface ApiActivityEvent {

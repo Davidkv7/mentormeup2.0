@@ -8,6 +8,7 @@ import { CoachProvider } from '@/contexts/coach-context'
 import { OAuthCallbackHandler } from '@/components/oauth-callback-handler'
 import { AuthGate } from '@/components/auth-gate'
 import { CoachWidget } from '@/components/coach-widget'
+import { ActivityTracker } from '@/components/activity-tracker'
 import './globals.css'
 
 const syne = Syne({
@@ -58,6 +59,7 @@ export default function RootLayout({
             <GoalsProvider>
               <CoachProvider>
                 <OAuthCallbackHandler />
+                <ActivityTracker />
                 <AuthGate>{children}</AuthGate>
                 <CoachWidget />
               </CoachProvider>

@@ -12,6 +12,7 @@ import {
 import { api, type ApiChatMessage } from "@/lib/api";
 import { useAuth } from "@/contexts/auth-context";
 import { useGoals } from "@/contexts/goals-context";
+import { logActivity } from "@/lib/activity";
 
 interface CoachContextValue {
   isOpen: boolean;
@@ -65,11 +66,15 @@ export function CoachProvider({ children }: { children: ReactNode }) {
         created_at: new Date().toISOString(),
       };
       setMessages((prev) => [...prev, optimistic]);
+      logActivity("coach.message_sent", `User sent coach a message`, {
+        preview: trimmed.slice(0, 120),
+      });
       try {
         const res = await api.post<{
           message_id: string;
           reply: string;
           created_at: string;
+          actions?: ApiChatMessage["actions"];
         }>("/api/coach/chat", { message: trimmed });
         const assistant: ApiChatMessage = {
           message_id: res.message_id,
@@ -77,9 +82,10 @@ export function CoachProvider({ children }: { children: ReactNode }) {
           role: "assistant",
           content: res.reply,
           created_at: res.created_at,
+          actions: res.actions ?? [],
         };
         setMessages((prev) => [...prev, assistant]);
-        // Coach may have implied data changes; pull fresh state.
+        // Coach may have mutated data (tool calls). Pull fresh state.
         void refreshGoals();
       } catch (err) {
         setMessages((prev) => [

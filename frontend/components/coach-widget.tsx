@@ -167,7 +167,7 @@ export function CoachWidget() {
                 {messages.map((m) => (
                   <div
                     key={m.message_id}
-                    className={`flex ${m.role === "user" ? "justify-end" : "justify-start"}`}
+                    className={`flex flex-col ${m.role === "user" ? "items-end" : "items-start"}`}
                   >
                     <div
                       className={`max-w-[85%] rounded-2xl px-4 py-2.5 font-sans text-sm leading-relaxed whitespace-pre-wrap ${
@@ -181,6 +181,37 @@ export function CoachWidget() {
                     >
                       {m.content}
                     </div>
+                    {m.role === "assistant" && m.actions && m.actions.length > 0 && (
+                      <div
+                        className="mt-2 flex flex-wrap gap-2 max-w-[85%]"
+                        data-testid={`coach-actions-${m.message_id}`}
+                      >
+                        {m.actions.map((action, i) => {
+                          const ok = action.ok;
+                          return (
+                            <span
+                              key={`${m.message_id}-action-${i}`}
+                              data-testid={`coach-action-chip-${action.tool}`}
+                              className={`inline-flex items-center gap-1.5 rounded-full px-3 py-1 font-mono text-[11px] leading-none ${
+                                ok
+                                  ? isDark
+                                    ? "bg-[rgba(245,197,24,0.12)] border border-[rgba(245,197,24,0.3)] text-[#F5C518]"
+                                    : "bg-[rgba(212,169,18,0.12)] border border-[rgba(212,169,18,0.3)] text-[#D4A912]"
+                                  : isDark
+                                    ? "bg-[rgba(239,68,68,0.10)] border border-[rgba(239,68,68,0.3)] text-[#F87171]"
+                                    : "bg-[rgba(239,68,68,0.08)] border border-[rgba(239,68,68,0.3)] text-[#DC2626]"
+                              }`}
+                              title={action.tool}
+                            >
+                              <span aria-hidden className="text-[13px] leading-none">
+                                {ok ? "✓" : "⚠"}
+                              </span>
+                              <span>{action.summary}</span>
+                            </span>
+                          );
+                        })}
+                      </div>
+                    )}
                   </div>
                 ))}
 
