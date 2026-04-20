@@ -1,203 +1,368 @@
-"use client"
+"use client";
 
-import { useState } from "react"
-import { useRouter } from "next/navigation"
-import { motion } from "motion/react"
-import { Target, Clock, Sparkles } from "lucide-react"
-import { ChatMessage } from "@/components/chat-message"
-import { ChatInput } from "@/components/chat-input"
-import { TypingIndicator } from "@/components/typing-indicator"
-import { useTheme } from "@/contexts/theme-context"
+import { useCallback, useEffect, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
+import { motion, AnimatePresence } from "motion/react";
+import { Sparkles, Target, Send } from "lucide-react";
+import { SidebarNav } from "@/components/sidebar-nav";
+import { useTheme } from "@/contexts/theme-context";
+import { useGoals } from "@/contexts/goals-context";
+import { api, ApiError } from "@/lib/api";
 
-interface Message {
-  id: number
-  content: string
-  isUser: boolean
-  timestamp: string
+interface IntakeMessage {
+  message_id: string;
+  role: "user" | "assistant";
+  content: string;
+  created_at: string;
 }
 
-const initialMessages: Message[] = [
-  {
-    id: 1,
-    content: "I see you want to lose 15kg — that's a meaningful goal. Before I build your personalized path, I need to understand where you're starting from. What's your current weight and height?",
-    isUser: false,
-    timestamp: "2:34 PM",
-  },
-  {
-    id: 2,
-    content: "I'm 92kg and 175cm tall. I've been at this weight for about 2 years now after gaining during the pandemic.",
-    isUser: true,
-    timestamp: "2:35 PM",
-  },
-  {
-    id: 3,
-    content: "Got it — 92kg at 175cm puts your BMI around 30. Two years is enough time for habits to solidify. Now, what's gotten in the way of losing weight in the past? Be honest — I'm not here to judge, just to understand.",
-    isUser: false,
-    timestamp: "2:35 PM",
-  },
-  {
-    id: 4,
-    content: "Honestly, I start strong for a week or two then fall off. Work gets busy, I skip the gym, then I stress eat at night. It's a cycle I can't seem to break.",
-    isUser: true,
-    timestamp: "2:36 PM",
-  },
-]
+interface IntakeHistory {
+  goal_id: string;
+  goal_title: string;
+  intake_status: "not_started" | "in_progress" | "building_path" | "complete" | "failed";
+  path_id: string | null;
+  messages: IntakeMessage[];
+}
 
 export default function IntakePage() {
-  const { theme } = useTheme()
-  const isDark = theme === "dark"
-  const [messages, setMessages] = useState<Message[]>(initialMessages)
-  const [isTyping, setIsTyping] = useState(true)
-  const router = useRouter()
+  const router = useRouter();
+  const { theme } = useTheme();
+  const isDark = theme === "dark";
+  const { activeGoalId, activeGoal, goals } = useGoals();
 
-  const handleSend = (content: string) => {
-    const newMessage: Message = {
-      id: messages.length + 1,
-      content,
-      isUser: true,
-      timestamp: new Date().toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }),
+  const [goalId, setGoalId] = useState<string | null>(activeGoalId);
+  const [goalTitle, setGoalTitle] = useState<string>(activeGoal?.title ?? "");
+  const [messages, setMessages] = useState<IntakeMessage[]>([]);
+  const [draft, setDraft] = useState("");
+  const [sending, setSending] = useState(false);
+  const [intakeStatus, setIntakeStatus] = useState<IntakeHistory["intake_status"]>("not_started");
+  const [bootstrapped, setBootstrapped] = useState(false);
+  const scrollRef = useRef<HTMLDivElement>(null);
+
+  // Pick the goal whose intake is most relevant (active if not yet complete,
+  // else the newest goal still in intake).
+  useEffect(() => {
+    if (goalId) return;
+    if (activeGoal && activeGoal.id) {
+      setGoalId(activeGoal.id);
+      setGoalTitle(activeGoal.title);
+    } else if (goals.length > 0) {
+      const newest = [...goals].sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0];
+      setGoalId(newest.id);
+      setGoalTitle(newest.title);
     }
-    setMessages([...messages, newMessage])
-    setIsTyping(true)
-    
-    setTimeout(() => {
-      router.push("/path")
-    }, 2000)
-  }
+  }, [goalId, activeGoal, goals]);
 
-  const handleSkip = () => {
-    router.push("/path")
-  }
+  // Load intake history for this goal on mount / goal change.
+  const loadHistory = useCallback(async () => {
+    if (!goalId) return;
+    try {
+      const h = await api.get<IntakeHistory>(`/api/intake/${goalId}/history`);
+      setGoalTitle(h.goal_title);
+      setMessages(h.messages);
+      setIntakeStatus(h.intake_status);
+      // If we're already past the intake, jump ahead.
+      if (h.intake_status === "complete" && h.path_id) {
+        router.replace(`/path?goal_id=${goalId}`);
+        return;
+      }
+    } catch (err) {
+      // Ignore — user may have no goal yet.
+    } finally {
+      setBootstrapped(true);
+    }
+  }, [goalId, router]);
+
+  useEffect(() => {
+    void loadHistory();
+  }, [loadHistory]);
+
+  // Auto-scroll to latest message.
+  useEffect(() => {
+    if (scrollRef.current) {
+      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+    }
+  }, [messages, sending]);
+
+  // When intake completes, poll for the built path then redirect.
+  useEffect(() => {
+    if (intakeStatus !== "building_path") return;
+    if (!goalId) return;
+    let cancelled = false;
+    const poll = async () => {
+      for (let attempt = 0; attempt < 90; attempt++) {
+        if (cancelled) return;
+        try {
+          await api.get(`/api/paths/${goalId}`);
+          if (!cancelled) router.replace(`/path?goal_id=${goalId}`);
+          return;
+        } catch (err) {
+          if (err instanceof ApiError && (err.status === 404 || err.status === 502)) {
+            await new Promise((r) => setTimeout(r, 3000));
+            continue;
+          }
+          throw err;
+        }
+      }
+    };
+    void poll();
+    return () => {
+      cancelled = true;
+    };
+  }, [intakeStatus, goalId, router]);
+
+  const handleSend = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const text = draft.trim();
+    if (!text || !goalId || sending) return;
+    setSending(true);
+    setDraft("");
+
+    const optimistic: IntakeMessage = {
+      message_id: `tmp_${Date.now()}`,
+      role: "user",
+      content: text,
+      created_at: new Date().toISOString(),
+    };
+    setMessages((prev) => [...prev, optimistic]);
+
+    try {
+      const res = await api.post<{
+        message_id: string;
+        reply: string;
+        intake_complete: boolean;
+        created_at: string;
+      }>("/api/intake/chat", { goal_id: goalId, message: text });
+
+      setMessages((prev) => [
+        ...prev,
+        {
+          message_id: res.message_id,
+          role: "assistant",
+          content: res.reply,
+          created_at: res.created_at,
+        },
+      ]);
+      if (res.intake_complete) {
+        setIntakeStatus("building_path");
+      } else {
+        setIntakeStatus("in_progress");
+      }
+    } catch (err) {
+      setMessages((prev) => [
+        ...prev,
+        {
+          message_id: `err_${Date.now()}`,
+          role: "assistant",
+          content: "I couldn't reach the coach just now. Try again in a moment.",
+          created_at: new Date().toISOString(),
+        },
+      ]);
+    } finally {
+      setSending(false);
+    }
+  };
+
+  const isBuilding = intakeStatus === "building_path";
 
   return (
-    <main className={`min-h-screen ${isDark ? "bg-[#080B14]" : "bg-[#F8F9FA]"} noise-bg relative overflow-hidden transition-colors duration-300`}>
-      {/* Background gradients */}
-      <div className="absolute inset-0 pointer-events-none">
-        <div className={`absolute top-1/3 left-1/2 -translate-x-1/2 w-[600px] lg:w-[900px] h-[500px] lg:h-[700px] ${isDark ? "bg-[radial-gradient(ellipse_at_center,_rgba(0,212,255,0.06)_0%,_transparent_60%)]" : "bg-[radial-gradient(ellipse_at_center,_rgba(0,212,255,0.03)_0%,_transparent_60%)]"}`} />
-        <div className={`absolute top-0 left-1/2 -translate-x-1/2 w-[500px] lg:w-[700px] h-[400px] lg:h-[500px] ${isDark ? "bg-[radial-gradient(ellipse_at_center,_rgba(245,197,24,0.04)_0%,_transparent_60%)]" : "bg-[radial-gradient(ellipse_at_center,_rgba(245,197,24,0.02)_0%,_transparent_60%)]"}`} />
-      </div>
+    <div
+      className={`min-h-screen noise-bg transition-colors duration-300 ${
+        isDark ? "bg-[#080B14]" : "bg-[#F8F9FA]"
+      }`}
+      data-testid="intake-page"
+    >
+      <SidebarNav />
 
-      {/* Top bar */}
-      <motion.header
-        initial={{ opacity: 0, y: -20 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ duration: 0.6, ease: [0.25, 0.4, 0.25, 1] }}
-        className="fixed top-0 left-0 right-0 z-50"
-        style={{
-          background: isDark 
-            ? 'linear-gradient(180deg, rgba(8, 11, 20, 0.95) 0%, rgba(8, 11, 20, 0.8) 100%)'
-            : 'linear-gradient(180deg, rgba(248, 249, 250, 0.95) 0%, rgba(248, 249, 250, 0.8) 100%)',
-          backdropFilter: 'blur(20px)',
-          borderBottom: isDark ? '1px solid rgba(255, 255, 255, 0.04)' : '1px solid rgba(0, 0, 0, 0.06)',
-        }}
-      >
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-10 py-4 sm:py-5 flex items-center justify-between">
-          <div className="flex flex-col gap-1 sm:gap-1.5">
-            <h1 className="text-[#F5C518] font-sans font-bold text-base sm:text-lg lg:text-xl">Building Your Path</h1>
-            <p className="text-[#00D4FF] font-mono text-[10px] sm:text-xs">Interview — Step 1 of 2</p>
+      <div className="relative md:ml-[72px] lg:ml-[240px] min-h-screen flex flex-col">
+        {/* Header */}
+        <motion.header
+          initial={{ opacity: 0, y: -20 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.5 }}
+          className={`sticky top-0 z-20 px-4 sm:px-6 lg:px-10 py-4 sm:py-5 flex items-center justify-between border-b ${
+            isDark ? "border-[rgba(255,255,255,0.04)]" : "border-[rgba(0,0,0,0.06)]"
+          }`}
+          style={{
+            background: isDark
+              ? "linear-gradient(180deg, rgba(8,11,20,0.95) 0%, rgba(8,11,20,0.8) 100%)"
+              : "linear-gradient(180deg, rgba(248,249,250,0.95) 0%, rgba(248,249,250,0.8) 100%)",
+            backdropFilter: "blur(20px)",
+          }}
+        >
+          <div className="flex flex-col gap-1">
+            <h1 className="text-[#F5C518] font-sans font-bold text-base sm:text-lg lg:text-xl">
+              {isBuilding ? "Building Your Path" : "Quick Intake"}
+            </h1>
+            <p className="text-[#00D4FF] font-mono text-[10px] sm:text-xs">
+              {goalTitle ? `Goal: ${goalTitle}` : "Select a goal to begin"}
+            </p>
           </div>
-          <button 
-            onClick={handleSkip}
-            className={`font-mono text-xs sm:text-sm transition-colors ${isDark ? "text-[rgba(255,255,255,0.4)] hover:text-[rgba(255,255,255,0.7)]" : "text-[rgba(0,0,0,0.4)] hover:text-[rgba(0,0,0,0.7)]"}`}
-          >
-            Skip →
-          </button>
-        </div>
-      </motion.header>
+          <div className="flex items-center gap-2">
+            <Target className="w-4 h-4 text-[#F5C518]" />
+            <span
+              className={`font-mono text-xs px-2.5 py-1 rounded-full ${
+                isDark
+                  ? "bg-[rgba(245,197,24,0.1)] text-[#F5C518]"
+                  : "bg-[rgba(212,169,18,0.12)] text-[#D4A912]"
+              }`}
+              data-testid="intake-status-pill"
+            >
+              {intakeStatus.replace("_", " ")}
+            </span>
+          </div>
+        </motion.header>
 
-      {/* Main content */}
-      <div className="relative z-10 pt-20 sm:pt-24 pb-32 sm:pb-36 px-4 sm:px-6 lg:px-10 max-w-7xl mx-auto">
-        <div className="lg:grid lg:grid-cols-12 lg:gap-8">
-          {/* Chat area */}
-          <div className="lg:col-span-8 xl:col-span-9">
-            <div className="max-w-3xl mx-auto lg:max-w-none">
-              <div className="flex flex-col gap-4 sm:gap-6">
-                {messages.map((message, index) => (
-                  <ChatMessage
-                    key={message.id}
-                    content={message.content}
-                    isUser={message.isUser}
-                    timestamp={message.timestamp}
-                    delay={index * 0.12}
-                  />
-                ))}
-                
-                {isTyping && (
-                  <motion.div
-                    initial={{ opacity: 0 }}
-                    animate={{ opacity: 1 }}
-                    transition={{ delay: messages.length * 0.12 + 0.3 }}
-                    className="pl-2"
+        {/* Messages */}
+        <div
+          ref={scrollRef}
+          className="flex-1 overflow-y-auto px-4 sm:px-6 lg:px-10 py-6 sm:py-8 pb-40"
+          data-testid="intake-messages"
+        >
+          {!bootstrapped && (
+            <p className={`font-mono text-sm ${isDark ? "text-[rgba(255,255,255,0.4)]" : "text-[rgba(0,0,0,0.4)]"}`}>
+              Loading your conversation…
+            </p>
+          )}
+
+          {bootstrapped && !goalId && (
+            <div className="max-w-xl mx-auto text-center mt-20">
+              <p className={`font-sans text-lg ${isDark ? "text-white" : "text-[#1A1D21]"}`}>
+                You don't have a goal yet.
+              </p>
+              <button
+                onClick={() => router.push("/")}
+                className="mt-6 px-6 py-3 rounded-full bg-[#F5C518] text-[#080B14] font-sans font-bold"
+              >
+                Enter a goal →
+              </button>
+            </div>
+          )}
+
+          {bootstrapped && messages.length === 0 && goalId && (
+            <motion.div
+              initial={{ opacity: 0, y: 10 }}
+              animate={{ opacity: 1, y: 0 }}
+              className={`max-w-2xl mx-auto rounded-2xl p-5 border-l-4 border-l-[#00D4FF] ${
+                isDark ? "bg-[rgba(0,212,255,0.06)]" : "bg-[rgba(0,212,255,0.04)]"
+              }`}
+            >
+              <p className={`font-mono text-sm leading-relaxed ${isDark ? "text-[rgba(255,255,255,0.85)]" : "text-[rgba(0,0,0,0.75)]"}`}>
+                Say hi and we'll start. I'll ask a few short questions, then build your path.
+                Takes about 2 minutes.
+              </p>
+            </motion.div>
+          )}
+
+          <div className="max-w-2xl mx-auto space-y-4">
+            <AnimatePresence initial={false}>
+              {messages.map((m) => (
+                <motion.div
+                  key={m.message_id}
+                  initial={{ opacity: 0, y: 8 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  transition={{ duration: 0.25 }}
+                  className={`flex ${m.role === "user" ? "justify-end" : "justify-start"}`}
+                  data-testid={`intake-msg-${m.role}`}
+                >
+                  <div
+                    className={`max-w-[85%] rounded-2xl px-4 py-2.5 font-sans text-sm leading-relaxed whitespace-pre-wrap ${
+                      m.role === "user"
+                        ? "bg-[#F5C518] text-[#080B14]"
+                        : isDark
+                          ? "bg-[rgba(255,255,255,0.05)] text-[rgba(255,255,255,0.9)] border border-[rgba(255,255,255,0.06)]"
+                          : "bg-white text-[#1A1D21] border border-[rgba(0,0,0,0.06)]"
+                    }`}
                   >
-                    <TypingIndicator />
-                  </motion.div>
-                )}
-              </div>
-            </div>
-          </div>
+                    {m.content}
+                  </div>
+                </motion.div>
+              ))}
+            </AnimatePresence>
 
-          {/* Context sidebar */}
-          <motion.aside
-            initial={{ opacity: 0, x: 20 }}
-            animate={{ opacity: 1, x: 0 }}
-            transition={{ duration: 0.5, delay: 0.4 }}
-            className="hidden lg:block lg:col-span-4 xl:col-span-3"
-          >
-            <div className="sticky top-24 space-y-5">
-              {/* Goal Context */}
-              <div className={`p-5 rounded-2xl border ${isDark ? "bg-[rgba(255,255,255,0.03)] border-[rgba(255,255,255,0.06)]" : "bg-white border-[rgba(0,0,0,0.06)]"}`}>
-                <div className="flex items-center gap-3 mb-4">
-                  <Target className="w-4 h-4 text-[#F5C518]" />
-                  <span className={`font-mono text-xs ${isDark ? "text-[rgba(255,255,255,0.5)]" : "text-[rgba(0,0,0,0.5)]"}`}>Your Goal</span>
+            {sending && (
+              <div className="flex justify-start">
+                <div
+                  className={`rounded-2xl px-4 py-2.5 text-sm ${
+                    isDark
+                      ? "bg-[rgba(255,255,255,0.05)] text-[rgba(255,255,255,0.5)]"
+                      : "bg-[rgba(0,0,0,0.04)] text-[rgba(0,0,0,0.5)]"
+                  }`}
+                >
+                  <span className="inline-flex gap-1">
+                    <span className="w-1.5 h-1.5 rounded-full bg-current animate-bounce" />
+                    <span className="w-1.5 h-1.5 rounded-full bg-current animate-bounce" style={{ animationDelay: "120ms" }} />
+                    <span className="w-1.5 h-1.5 rounded-full bg-current animate-bounce" style={{ animationDelay: "240ms" }} />
+                  </span>
                 </div>
-                <p className={`font-sans font-semibold text-lg ${isDark ? "text-white" : "text-[#1A1D21]"}`}>Lose 15kg</p>
+              </div>
+            )}
+
+            {isBuilding && (
+              <motion.div
+                initial={{ opacity: 0, y: 20 }}
+                animate={{ opacity: 1, y: 0 }}
+                className={`mt-10 rounded-2xl p-8 text-center border-2 ${
+                  isDark
+                    ? "bg-[rgba(245,197,24,0.04)] border-[rgba(245,197,24,0.2)]"
+                    : "bg-[rgba(245,197,24,0.06)] border-[rgba(212,169,18,0.25)]"
+                }`}
+                data-testid="intake-building-banner"
+              >
+                <Sparkles className="w-8 h-8 text-[#F5C518] mx-auto mb-3 animate-pulse" />
+                <p className={`font-sans font-semibold text-lg ${isDark ? "text-white" : "text-[#1A1D21]"}`}>
+                  Building your path…
+                </p>
                 <p className={`font-mono text-xs mt-2 ${isDark ? "text-[rgba(255,255,255,0.5)]" : "text-[rgba(0,0,0,0.5)]"}`}>
-                  Submitted just now
+                  Researching your goal, mapping phases, scheduling tasks. ~30 seconds.
                 </p>
-              </div>
-
-              {/* What happens next */}
-              <div className={`p-5 rounded-2xl border ${isDark ? "bg-[rgba(255,255,255,0.03)] border-[rgba(255,255,255,0.06)]" : "bg-white border-[rgba(0,0,0,0.06)]"}`}>
-                <div className="flex items-center gap-3 mb-4">
-                  <Sparkles className="w-4 h-4 text-[#00D4FF]" />
-                  <span className={`font-mono text-xs ${isDark ? "text-[rgba(255,255,255,0.5)]" : "text-[rgba(0,0,0,0.5)]"}`}>What&apos;s Next</span>
-                </div>
-                <ul className="space-y-3">
-                  <li className="flex items-start gap-3">
-                    <span className="w-5 h-5 rounded-full bg-[rgba(245,197,24,0.15)] text-[#F5C518] text-xs flex items-center justify-center flex-shrink-0 mt-0.5">1</span>
-                    <span className={`font-mono text-sm ${isDark ? "text-[rgba(255,255,255,0.7)]" : "text-[rgba(0,0,0,0.7)]"}`}>Quick intake chat</span>
-                  </li>
-                  <li className="flex items-start gap-3">
-                    <span className={`w-5 h-5 rounded-full text-xs flex items-center justify-center flex-shrink-0 mt-0.5 ${isDark ? "bg-[rgba(255,255,255,0.06)] text-[rgba(255,255,255,0.4)]" : "bg-[rgba(0,0,0,0.04)] text-[rgba(0,0,0,0.4)]"}`}>2</span>
-                    <span className={`font-mono text-sm ${isDark ? "text-[rgba(255,255,255,0.5)]" : "text-[rgba(0,0,0,0.5)]"}`}>AI builds your path</span>
-                  </li>
-                  <li className="flex items-start gap-3">
-                    <span className={`w-5 h-5 rounded-full text-xs flex items-center justify-center flex-shrink-0 mt-0.5 ${isDark ? "bg-[rgba(255,255,255,0.06)] text-[rgba(255,255,255,0.4)]" : "bg-[rgba(0,0,0,0.04)] text-[rgba(0,0,0,0.4)]"}`}>3</span>
-                    <span className={`font-mono text-sm ${isDark ? "text-[rgba(255,255,255,0.5)]" : "text-[rgba(0,0,0,0.5)]"}`}>Start your first task</span>
-                  </li>
-                </ul>
-              </div>
-
-              {/* Time estimate */}
-              <div className={`p-5 rounded-2xl border ${isDark ? "bg-[rgba(255,255,255,0.03)] border-[rgba(255,255,255,0.06)]" : "bg-white border-[rgba(0,0,0,0.06)]"}`}>
-                <div className="flex items-center gap-3 mb-3">
-                  <Clock className="w-4 h-4 text-[#9D4EDD]" />
-                  <span className={`font-mono text-xs ${isDark ? "text-[rgba(255,255,255,0.5)]" : "text-[rgba(0,0,0,0.5)]"}`}>Estimated Time</span>
-                </div>
-                <p className={`font-sans font-semibold ${isDark ? "text-white" : "text-[#1A1D21]"}`}>2-3 minutes</p>
-                <p className={`font-mono text-xs mt-1 ${isDark ? "text-[rgba(255,255,255,0.5)]" : "text-[rgba(0,0,0,0.5)]"}`}>
-                  Just a few questions to personalize your journey
-                </p>
-              </div>
-            </div>
-          </motion.aside>
+              </motion.div>
+            )}
+          </div>
         </div>
-      </div>
 
-      {/* Chat input */}
-      <div className="fixed bottom-0 left-0 right-0 lg:right-[calc(33.333%-2rem)] xl:right-[calc(25%-2rem)]">
-        <ChatInput onSend={handleSend} />
+        {/* Input */}
+        {!isBuilding && goalId && (
+          <form
+            onSubmit={handleSend}
+            className={`fixed bottom-0 left-0 right-0 md:left-[72px] lg:left-[240px] px-4 sm:px-6 lg:px-10 py-4 border-t ${
+              isDark ? "bg-[#080B14]/95 border-[rgba(255,255,255,0.06)]" : "bg-[#F8F9FA]/95 border-[rgba(0,0,0,0.06)]"
+            }`}
+            style={{ backdropFilter: "blur(20px)" }}
+          >
+            <div className="max-w-2xl mx-auto flex items-center gap-3">
+              <input
+                type="text"
+                value={draft}
+                onChange={(e) => setDraft(e.target.value)}
+                placeholder="Say hi, or answer the coach's question…"
+                disabled={sending}
+                data-testid="intake-input"
+                className={`flex-1 px-5 py-3.5 rounded-full font-mono text-sm focus:outline-none border ${
+                  isDark
+                    ? "bg-[rgba(255,255,255,0.04)] border-[rgba(255,255,255,0.08)] text-white placeholder:text-[rgba(255,255,255,0.3)] focus:border-[#F5C518]/40"
+                    : "bg-white border-[rgba(0,0,0,0.08)] text-[#1A1D21] placeholder:text-[rgba(0,0,0,0.3)] focus:border-[#D4A912]/40"
+                } disabled:opacity-60`}
+              />
+              <button
+                type="submit"
+                disabled={!draft.trim() || sending}
+                data-testid="intake-send"
+                className={`p-3.5 rounded-full transition-colors ${
+                  draft.trim() && !sending
+                    ? "bg-[#F5C518] text-[#080B14] hover:bg-[#FFD633]"
+                    : isDark
+                      ? "bg-[rgba(255,255,255,0.06)] text-[rgba(255,255,255,0.3)]"
+                      : "bg-[rgba(0,0,0,0.05)] text-[rgba(0,0,0,0.3)]"
+                }`}
+                aria-label="Send"
+              >
+                <Send className="w-4 h-4" />
+              </button>
+            </div>
+          </form>
+        )}
       </div>
-    </main>
-  )
+    </div>
+  );
 }
