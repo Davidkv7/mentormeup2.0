@@ -1,14 +1,18 @@
 /**
  * Minimal fetch wrapper for the MentorMeUp backend.
- * - Always sends credentials so the httpOnly session cookie rides along.
+ * - Uses a RELATIVE URL (no host prefix) so every request is first-party to
+ *   whatever preview hostname the browser is on — this is required because
+ *   the Emergent preview serves the app from multiple hosts (e.g.
+ *   mentor-hub-141.preview.emergentagent.com AND the id-based one), and the
+ *   httpOnly auth cookie must be first-party or mobile browsers will silently
+ *   drop it (iOS Safari / Chrome third-party cookie blocking).
+ * - Always sends credentials so the cookie rides along.
  * - Throws a typed ApiError on non-2xx so callers can react.
  */
-const BASE = process.env.NEXT_PUBLIC_BACKEND_URL;
-
-if (!BASE && typeof window !== "undefined") {
-  // eslint-disable-next-line no-console
-  console.warn("NEXT_PUBLIC_BACKEND_URL is not set");
-}
+// Empty base ⇒ relative URLs (same-origin fetch). A user-provided
+// NEXT_PUBLIC_BACKEND_URL is still respected as an explicit override (useful
+// for local dev hitting a separate backend).
+const BASE = process.env.NEXT_PUBLIC_BACKEND_URL_OVERRIDE ?? "";
 
 export class ApiError extends Error {
   status: number;
