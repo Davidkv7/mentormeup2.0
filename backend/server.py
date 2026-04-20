@@ -32,8 +32,10 @@ CORS_ORIGIN_REGEX = os.environ.get(
     r"https://.*\.(emergentagent\.com|emergentcf\.cloud)$",
 )
 
-COACH_MODEL_PROVIDER = "anthropic"
-COACH_MODEL_NAME = "claude-sonnet-4-6"
+COACH_MODEL_PROVIDER = "openai"
+COACH_MODEL_NAME = "gpt-4o"
+INTAKE_MODEL_PROVIDER = "anthropic"
+INTAKE_MODEL_NAME = "claude-sonnet-4-6"
 SESSION_DURATION_DAYS = 7
 
 # ------------------------------------------------------------------ db
@@ -113,6 +115,7 @@ class ChatResponse(BaseModel):
     message_id: str
     reply: str
     created_at: datetime
+    actions: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class ActivityEvent(BaseModel):
@@ -481,24 +484,45 @@ async def recent_activity(user: User = Depends(get_current_user), limit: int = 2
 
 
 # ------------------------------------------------------------------ coach chat
-COACH_SYSTEM_PROMPT = """You are the MentorMeUp Coach — a warm, candid, and sharp personal mentor \
-who helps {user_name} reach the goals they've set. You speak in short, human sentences. You are \
-not a sycophant; you challenge weak plans, celebrate real progress, and always end with a \
-concrete next step the user can take in the next 24 hours.
+COACH_SYSTEM_PROMPT = """You are the MentorMeUp Coach assistant running inside a production web app.
+The user is {user_name}. When {user_name} asks you to do something actionable (mark a task
+complete, save a note, log mood) you MUST emit a structured <action> tag that the app's
+backend executes. The app STRIPS these tags before showing the reply to the user — they are
+the protocol, not pretend. If you refuse to emit the tags, the feature is broken.
 
-You have direct knowledge of the user's current state (goals, tasks, recent activity) which is \
-provided below. Reference it specifically — do not speak in generalities when specifics are \
-available. If the user is on track, say so. If they are drifting, name it kindly and refocus.
+# EXAMPLE — follow this exact pattern
 
-# Current user context
+User: "I just finished my morning run, mark the first micro-task done and save a note that says 'legs feel great'."
+
+Correct assistant reply:
+Done — logging that now.
+<action>{{"tool": "toggle_task", "args": {{"task_id": "t-1-1-1-1", "completed": true, "mood_today": "great"}}}}</action>
+<action>{{"tool": "create_note", "args": {{"title": "Morning run", "content": "Legs feel great.", "goal_id": "goal_abc"}}}}</action>
+One small thing: tomorrow add a 5-min warmup before you start.
+
+# TOOL CATALOG
+- create_note(title, content, goal_id?)  — save a note, optionally linked to a goal.
+- toggle_task(task_id, completed?, mood_today?)  — flip a path micro-task. mood_today must be
+  "great", "ok", or "drained". Task IDs appear in the context below. NEVER invent an ID — if
+  you don't see it, ask the user what they mean.
+
+RULES
+- Max 3 <action> calls per turn.
+- Never say "I can't do that" or "I'm an AI" about these actions — they ARE real.
+- If the user says "I did X", default to marking it done unless they explicitly say otherwise.
+
+# COACHING STYLE
+You are warm, candid, and sharp — a mentor who challenges weak plans and celebrates real
+progress. Short human sentences. No bullet lists unless the user asks. No emoji spam. No
+markdown headings. End every reply with a single concrete next action (verb + object +
+timeframe) UNLESS you're just confirming a tool call.
+
+# USER CONTEXT (live data — reference specifically, don't speak in generalities)
 {context}
 
-# Coaching rules
-- Be brief. Two short paragraphs max unless asked for depth.
-- Always anchor advice to a goal in the user's list.
-- End every reply with a single, specific next action (verb + object + timeframe).
-- Never invent goals, tasks, or events that the user hasn't told you about.
-- If the user is new or has no goals, your job is to help them pick and shape their first one."""
+# HARD RULES
+- Never invent goals, tasks, or events the user hasn't mentioned.
+- If the user is new / has no goals, help them pick and shape their first one."""
 
 
 async def _build_coach_context(user: User) -> str:
@@ -523,12 +547,25 @@ async def _build_coach_context(user: User) -> str:
             tasks_done = sum(1 for t in g["daily_tasks"] if t["completed"])
             tasks_total = len(g["daily_tasks"])
             lines.append(
-                f"  - {g['title']} [{g['status']}] progress={g['progress']}% "
-                f"phase={g['current_phase']}/{len(g['phases'])} tasks_today={tasks_done}/{tasks_total}"
+                f"  - {g['title']} (goal_id={g['goal_id']}) [{g['status']}] progress={g['progress']}% "
+                f"phase={g['current_phase']}/{len(g['phases'])} legacy_tasks={tasks_done}/{tasks_total}"
             )
-            for t in g["daily_tasks"]:
-                mark = "[x]" if t["completed"] else "[ ]"
-                lines.append(f"      {mark} {t['title']} ({t['duration']})")
+            # If there's a generated path for this goal, embed its micro-tasks so
+            # the coach can reference task_ids when emitting toggle_task calls.
+            path = await db.paths.find_one({"goal_id": g["goal_id"]}, {"_id": 0})
+            if path:
+                lines.append(f"    path ({path['estimated_duration_weeks']} wk, {path['weekly_time_commitment_hours']} hr/wk):")
+                for ph in path["phases"]:
+                    lines.append(f"      phase {ph['order']}: {ph['title']}")
+                    for mst in ph["milestones"]:
+                        lines.append(f"        milestone {mst['order']}: {mst['title']}")
+                        for st in mst["steps"]:
+                            for t in st["micro_tasks"]:
+                                mark = "[x]" if t.get("completed") else "[ ]"
+                                mood = f" mood={t.get('mood_today')}" if t.get("mood_today") else ""
+                                lines.append(
+                                    f"          {mark} {t['task_id']}: {t['title']} ({t['duration_minutes']}m){mood}"
+                                )
     if recent:
         lines.append("\nRecent activity (newest first):")
         for a in recent:
@@ -587,9 +624,13 @@ async def coach_chat(body: ChatRequest, user: User = Depends(get_current_user)):
     ).with_model(COACH_MODEL_PROVIDER, COACH_MODEL_NAME)
 
     try:
-        reply_text = await chat.send_message(UserMessage(text=body.message))
+        raw_reply = await chat.send_message(UserMessage(text=body.message))
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=502, detail=f"Coach LLM error: {exc}") from exc
+
+    # Execute any inline <action> tool calls Claude emitted and strip them from
+    # the reply before persisting/returning the user-facing text.
+    reply_text, actions = await _execute_tool_calls(raw_reply, user)
 
     assistant_msg_id = f"msg_{uuid.uuid4().hex[:12]}"
     created_at = _now()
@@ -599,10 +640,14 @@ async def coach_chat(body: ChatRequest, user: User = Depends(get_current_user)):
             "user_id": user.user_id,
             "role": "assistant",
             "content": reply_text,
+            "actions": actions,
             "created_at": created_at,
         }
     )
-    return ChatResponse(message_id=assistant_msg_id, reply=reply_text, created_at=created_at)
+    return ChatResponse(
+        message_id=assistant_msg_id, reply=reply_text,
+        created_at=created_at, actions=actions,
+    )
 
 
 @app.get("/api/coach/history")
@@ -866,13 +911,12 @@ async def intake_chat(body: IntakeChatRequest, user: User = Depends(get_current_
             "completion message now."
         )
 
-    # Fresh session id each call — we seed history via initial_messages.
     chat = LlmChat(
         api_key=EMERGENT_LLM_KEY,
         session_id=f"intake:{body.goal_id}:{uuid.uuid4().hex[:6]}",
         system_message=system_prompt,
         initial_messages=initial_messages or None,
-    ).with_model(COACH_MODEL_PROVIDER, COACH_MODEL_NAME)
+    ).with_model(INTAKE_MODEL_PROVIDER, INTAKE_MODEL_NAME)
 
     try:
         raw_reply = await chat.send_message(UserMessage(text=body.message))
@@ -1104,3 +1148,260 @@ async def list_paths(user: User = Depends(get_current_user)):
     )
     return [p async for p in cursor]
 
+
+
+# =====================================================================
+# NOTES CRUD
+# =====================================================================
+
+class NoteCreate(BaseModel):
+    title: str
+    content: str
+    goal_id: str | None = None
+    tags: list[str] = Field(default_factory=list)
+
+
+class NoteUpdate(BaseModel):
+    title: str | None = None
+    content: str | None = None
+    tags: list[str] | None = None
+
+
+@app.get("/api/notes")
+async def list_notes(user: User = Depends(get_current_user), goal_id: str | None = None):
+    query: dict[str, Any] = {"user_id": user.user_id}
+    if goal_id:
+        query["goal_id"] = goal_id
+    cursor = db.notes.find(query, {"_id": 0}).sort("created_at", -1)
+    return [doc async for doc in cursor]
+
+
+@app.post("/api/notes")
+async def create_note(body: NoteCreate, user: User = Depends(get_current_user)):
+    note_id = f"note_{uuid.uuid4().hex[:12]}"
+    doc = {
+        "note_id": note_id,
+        "user_id": user.user_id,
+        "goal_id": body.goal_id,
+        "title": body.title,
+        "content": body.content,
+        "tags": body.tags,
+        "created_at": _now(),
+        "updated_at": _now(),
+    }
+    await db.notes.insert_one(doc)
+    await _log_activity(
+        user.user_id, "note.created", f"Created note: {body.title}",
+        {"note_id": note_id, "goal_id": body.goal_id},
+    )
+    return await db.notes.find_one({"note_id": note_id}, {"_id": 0})
+
+
+@app.patch("/api/notes/{note_id}")
+async def update_note(note_id: str, body: NoteUpdate, user: User = Depends(get_current_user)):
+    updates = {k: v for k, v in body.model_dump(exclude_unset=True).items() if v is not None}
+    if not updates:
+        raise HTTPException(status_code=400, detail="No fields to update")
+    updates["updated_at"] = _now()
+    result = await db.notes.update_one(
+        {"note_id": note_id, "user_id": user.user_id},
+        {"$set": updates},
+    )
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Note not found")
+    return await db.notes.find_one({"note_id": note_id}, {"_id": 0})
+
+
+@app.delete("/api/notes/{note_id}")
+async def delete_note_endpoint(note_id: str, user: User = Depends(get_current_user)):
+    result = await db.notes.delete_one({"note_id": note_id, "user_id": user.user_id})
+    if result.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Note not found")
+    return {"ok": True}
+
+
+# =====================================================================
+# PATH TASK TOGGLE + MOOD
+# =====================================================================
+
+class TaskToggleBody(BaseModel):
+    completed: bool | None = None
+    mood_today: str | None = None  # "great" | "ok" | "drained"
+
+
+@app.post("/api/paths/{goal_id}/tasks/{task_id}/toggle")
+async def toggle_path_task(
+    goal_id: str, task_id: str, body: TaskToggleBody,
+    user: User = Depends(get_current_user),
+):
+    path = await db.paths.find_one({"goal_id": goal_id, "user_id": user.user_id}, {"_id": 0})
+    if not path:
+        raise HTTPException(status_code=404, detail="Path not found")
+    phases = path["phases"]
+    found_title = None
+    for phase in phases:
+        for milestone in phase["milestones"]:
+            for step in milestone["steps"]:
+                for task in step["micro_tasks"]:
+                    if task["task_id"] == task_id:
+                        if body.completed is not None:
+                            task["completed"] = body.completed
+                        if body.mood_today is not None:
+                            task["mood_today"] = body.mood_today
+                        found_title = task["title"]
+    if not found_title:
+        raise HTTPException(status_code=404, detail="Task not found in path")
+    total = sum(
+        1 for ph in phases for m in ph["milestones"] for s in m["steps"] for _ in s["micro_tasks"]
+    )
+    done = sum(
+        1 for ph in phases for m in ph["milestones"] for s in m["steps"]
+        for t in s["micro_tasks"] if t.get("completed")
+    )
+    progress = round((done / total) * 100) if total else 0
+    await db.paths.update_one(
+        {"path_id": path["path_id"]},
+        {"$set": {"phases": phases, "progress": progress}},
+    )
+    await _log_activity(
+        user.user_id,
+        "task.completed" if body.completed else "task.updated",
+        f"Task {'completed' if body.completed else 'updated'}: {found_title}",
+        {"goal_id": goal_id, "task_id": task_id, "mood_today": body.mood_today},
+    )
+    return await db.paths.find_one({"goal_id": goal_id}, {"_id": 0})
+
+
+@app.get("/api/paths/{goal_id}/today")
+async def next_micro_task(goal_id: str, user: User = Depends(get_current_user)):
+    path = await db.paths.find_one({"goal_id": goal_id, "user_id": user.user_id}, {"_id": 0})
+    if not path:
+        raise HTTPException(status_code=404, detail="Path not found")
+    for phase in path["phases"]:
+        for milestone in phase["milestones"]:
+            for step in milestone["steps"]:
+                for task in step["micro_tasks"]:
+                    if not task.get("completed"):
+                        return {
+                            "task": task,
+                            "step_title": step["title"],
+                            "step_why": step.get("why_it_matters", ""),
+                            "milestone_title": milestone["title"],
+                            "phase_title": phase["title"],
+                            "goal_title": path["goal_title"],
+                            "path_id": path["path_id"],
+                            "goal_id": goal_id,
+                        }
+    return {"task": None, "message": "All tasks complete. Incredible."}
+
+
+# =====================================================================
+# COACH TOOL CALLING
+# =====================================================================
+
+TOOL_CALL_PATTERN = re.compile(r"<action>\s*(\{.*?\})\s*</action>", re.DOTALL)
+
+TOOL_SYSTEM_PROMPT_SUFFIX = """
+
+AVAILABLE TOOLS
+You can take real actions by emitting tool calls inline. Use tools ONLY when the
+user explicitly asks for something actionable. After any user-facing prose, emit
+each tool call on its own line:
+
+<action>{"tool": "create_note", "args": {"title": "...", "content": "...", "goal_id": "goal_xxx"}}</action>
+<action>{"tool": "toggle_task", "args": {"task_id": "t-1-1-1-1", "completed": true, "mood_today": "great"}}</action>
+
+The user never sees the <action> blocks (stripped server-side). They DO see a
+small confirmation chip like "✓ Created note 'Workout log'" so they know what
+happened. Confirm intent in prose first, THEN emit the call.
+
+TOOL CATALOG
+- create_note(title, content, goal_id?) — saves a note; attach to a goal when relevant.
+- toggle_task(task_id, completed?, mood_today?) — marks a path micro-task complete;
+  optional mood_today one of: "great", "ok", "drained". Task IDs appear in the
+  user context below. Never invent IDs.
+
+RULES
+- Never fabricate IDs. If unsure, ask the user what they meant.
+- Don't emit more than 3 tool calls per turn.
+- Don't use tools speculatively — only when the user has clearly asked for them.
+"""
+
+
+async def _execute_tool_calls(
+    raw_reply: str, user: User,
+) -> tuple[str, list[dict[str, Any]]]:
+    matches = TOOL_CALL_PATTERN.findall(raw_reply)
+    if not matches:
+        return raw_reply.strip(), []
+
+    results: list[dict[str, Any]] = []
+    for m in matches:
+        call: dict[str, Any] = {}
+        try:
+            call = json.loads(m)
+            tool = call.get("tool")
+            args = call.get("args", {}) or {}
+            if tool == "create_note":
+                note_id = f"note_{uuid.uuid4().hex[:12]}"
+                await db.notes.insert_one({
+                    "note_id": note_id, "user_id": user.user_id,
+                    "goal_id": args.get("goal_id"),
+                    "title": args.get("title", "Untitled"),
+                    "content": args.get("content", ""),
+                    "tags": ["from-coach"],
+                    "created_at": _now(), "updated_at": _now(),
+                })
+                await _log_activity(
+                    user.user_id, "note.created_by_coach",
+                    f"Coach created note: {args.get('title', 'Untitled')}",
+                    {"note_id": note_id, "goal_id": args.get("goal_id")},
+                )
+                results.append({
+                    "tool": tool, "ok": True,
+                    "summary": f"Created note “{args.get('title', 'Untitled')}”",
+                    "note_id": note_id,
+                })
+            elif tool == "toggle_task":
+                task_id = args.get("task_id")
+                if not task_id:
+                    results.append({"tool": tool, "ok": False, "summary": "Missing task_id"})
+                    continue
+                path = await db.paths.find_one(
+                    {"user_id": user.user_id, "phases.milestones.steps.micro_tasks.task_id": task_id},
+                    {"_id": 0},
+                )
+                if not path:
+                    results.append({"tool": tool, "ok": False, "summary": f"Task {task_id} not found"})
+                    continue
+                phases = path["phases"]
+                hit_title = None
+                for ph in phases:
+                    for m2 in ph["milestones"]:
+                        for s in m2["steps"]:
+                            for t in s["micro_tasks"]:
+                                if t["task_id"] == task_id:
+                                    if "completed" in args:
+                                        t["completed"] = bool(args["completed"])
+                                    if "mood_today" in args:
+                                        t["mood_today"] = args["mood_today"]
+                                    hit_title = t["title"]
+                await db.paths.update_one(
+                    {"path_id": path["path_id"]}, {"$set": {"phases": phases}},
+                )
+                await _log_activity(
+                    user.user_id, "task.toggled_by_coach",
+                    f"Coach toggled: {hit_title}", {"task_id": task_id},
+                )
+                results.append({"tool": tool, "ok": True, "summary": f"Marked “{hit_title}” done"})
+            else:
+                results.append({"tool": tool or "?", "ok": False, "summary": f"Unknown tool: {tool}"})
+        except Exception as exc:  # noqa: BLE001
+            results.append({
+                "tool": call.get("tool") if isinstance(call, dict) else "?",
+                "ok": False, "summary": str(exc)[:150],
+            })
+
+    clean = TOOL_CALL_PATTERN.sub("", raw_reply).strip()
+    clean = re.sub(r"\n{3,}", "\n\n", clean)
+    return clean, results
