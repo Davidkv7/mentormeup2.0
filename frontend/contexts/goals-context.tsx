@@ -86,7 +86,15 @@ function toGoal(api: ApiGoal): Goal {
 export function GoalsProvider({ children }: { children: React.ReactNode }) {
   const { status } = useAuth();
   const [goals, setGoals] = useState<Goal[]>([]);
-  const [activeGoalId, setActiveGoalId] = useState<string | null>(null);
+  const [activeGoalId, setActiveGoalId] = useState<string | null>(() => {
+    // Lazy init from localStorage so we don't wipe it on first render.
+    if (typeof window === "undefined") return null;
+    try {
+      return localStorage.getItem(ACTIVE_GOAL_STORAGE_KEY);
+    } catch {
+      return null;
+    }
+  });
   const [loading, setLoading] = useState(false);
 
   const refresh = useCallback(async () => {
@@ -95,6 +103,13 @@ export function GoalsProvider({ children }: { children: React.ReactNode }) {
     try {
       const list = await api.get<ApiGoal[]>("/api/goals");
       setGoals(list.map(toGoal));
+      // If there's no active goal yet but we have goals, default to the first
+      // active one so pages like /daily work without the user explicitly picking.
+      setActiveGoalId((current) => {
+        if (current && list.some((g) => g.goal_id === current)) return current;
+        const firstActive = list.find((g) => g.status === "active");
+        return firstActive ? firstActive.goal_id : current;
+      });
     } finally {
       setLoading(false);
     }
@@ -103,8 +118,6 @@ export function GoalsProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     if (status === "authenticated") {
       void refresh();
-      const stored = typeof window !== "undefined" ? localStorage.getItem(ACTIVE_GOAL_STORAGE_KEY) : null;
-      if (stored) setActiveGoalId(stored);
     } else if (status === "anonymous") {
       setGoals([]);
       setActiveGoalId(null);

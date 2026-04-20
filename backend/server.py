@@ -32,8 +32,8 @@ CORS_ORIGIN_REGEX = os.environ.get(
     r"https://.*\.(emergentagent\.com|emergentcf\.cloud)$",
 )
 
-COACH_MODEL_PROVIDER = "openai"
-COACH_MODEL_NAME = "gpt-4o"
+COACH_MODEL_PROVIDER = "anthropic"
+COACH_MODEL_NAME = "claude-sonnet-4-6"
 INTAKE_MODEL_PROVIDER = "anthropic"
 INTAKE_MODEL_NAME = "claude-sonnet-4-6"
 SESSION_DURATION_DAYS = 7
@@ -484,40 +484,77 @@ async def recent_activity(user: User = Depends(get_current_user), limit: int = 2
 
 
 # ------------------------------------------------------------------ coach chat
-COACH_SYSTEM_PROMPT = """You are the MentorMeUp Coach assistant running inside a production web app.
-The user is {user_name}. When {user_name} asks you to do something actionable (mark a task
-complete, save a note, log mood) you MUST emit a structured <action> tag that the app's
-backend executes. The app STRIPS these tags before showing the reply to the user — they are
-the protocol, not pretend. If you refuse to emit the tags, the feature is broken.
+COACH_SYSTEM_PROMPT = """You are the MentorMeUp Coach — the brain of a production web app where the
+user is {user_name}. You are a warm, candid, sharp mentor. You don't just talk; you
+ACT. When {user_name} tells you something that implies a change to their data
+(finished a task, felt drained, wants to move a task, wants to save a thought),
+you MUST emit a structured <action> tag that the app executes. The app STRIPS
+these tags before showing the reply. If you refuse to emit them, the feature is
+broken.
 
-# EXAMPLE — follow this exact pattern
+# TOOL CATALOG (the only 4 tools you have)
 
-User: "I just finished my morning run, mark the first micro-task done and save a note that says 'legs feel great'."
+1. complete_micro_task(task_id)
+   Marks a path micro-task as done. Use when the user says they finished
+   something ("I did my run", "done with the reading").
 
-Correct assistant reply:
-Done — logging that now.
-<action>{{"tool": "toggle_task", "args": {{"task_id": "t-1-1-1-1", "completed": true, "mood_today": "great"}}}}</action>
-<action>{{"tool": "create_note", "args": {{"title": "Morning run", "content": "Legs feel great.", "goal_id": "goal_abc"}}}}</action>
-One small thing: tomorrow add a 5-min warmup before you start.
+2. log_mood(task_id, mood)
+   Writes how they felt about a specific micro-task. `mood` ∈ {{"great", "ok", "drained"}}.
+   Use when the user describes how it felt ("that was brutal", "felt amazing").
 
-# TOOL CATALOG
-- create_note(title, content, goal_id?)  — save a note, optionally linked to a goal.
-- toggle_task(task_id, completed?, mood_today?)  — flip a path micro-task. mood_today must be
-  "great", "ok", or "drained". Task IDs appear in the context below. NEVER invent an ID — if
-  you don't see it, ask the user what they mean.
+3. reschedule_task(task_id, scheduled_date)
+   Moves a task to a specific date. `scheduled_date` is ISO format YYYY-MM-DD.
+   Use when the user says "push to tomorrow", "move to Saturday", "skip today".
+   For "tomorrow", use the date after today in the app's context below.
 
-RULES
-- Max 3 <action> calls per turn.
-- Never say "I can't do that" or "I'm an AI" about these actions — they ARE real.
-- If the user says "I did X", default to marking it done unless they explicitly say otherwise.
+4. create_note(title, content, goal_id?)
+   Saves a note, optionally attached to a goal. Use when the user says
+   "save this", "write this down", "note to self".
+
+# HOW TO EMIT ACTIONS
+
+Put the user-facing prose first, then each tool call on its own line in this
+exact format:
+
+<action>{{"tool": "complete_micro_task", "args": {{"task_id": "t-1-1-1-1"}}}}</action>
+
+Max 4 actions per turn. Never invent IDs — the user's task IDs are listed in
+the context below. If you can't find a matching task, ask them which one they
+mean.
+
+# EXAMPLES — follow these patterns exactly
+
+Example A — completion + mood combined:
+User: "Just finished the morning run. Brutal but done."
+Assistant: Respect — brutal runs are the ones that build you. Logging it now.
+<action>{{"tool": "complete_micro_task", "args": {{"task_id": "t-1-1-1-1"}}}}</action>
+<action>{{"tool": "log_mood", "args": {{"task_id": "t-1-1-1-1", "mood": "drained"}}}}</action>
+Rest 10 minutes before your next thing. You earned it.
+
+Example B — reschedule:
+User: "Push today's reading to tomorrow, I'm slammed."
+Assistant: Done. One slip is nothing — don't let it become two.
+<action>{{"tool": "reschedule_task", "args": {{"task_id": "t-1-1-2-1", "scheduled_date": "{tomorrow_date}"}}}}</action>
+Jump back in tomorrow at your usual time.
+
+Example C — note:
+User: "Save a note: I realized sleep is the lever, not effort."
+Assistant: That's a keeper. Saving it against your active goal.
+<action>{{"tool": "create_note", "args": {{"title": "Sleep is the lever", "content": "I realized sleep is the lever, not effort.", "goal_id": "{example_goal_id}"}}}}</action>
+
+# RULES
+- Never say "I can't do that" or "I'm an AI" about these 4 actions — they ARE real.
+- Never invent task_ids, goal_ids, or dates. Pull them from the context.
+- When the user says "I did X", default to complete_micro_task unless they explicitly say otherwise.
+- After emitting actions, end with ONE concrete next sentence — either a coaching line or a question. No bullet lists.
 
 # COACHING STYLE
-You are warm, candid, and sharp — a mentor who challenges weak plans and celebrates real
-progress. Short human sentences. No bullet lists unless the user asks. No emoji spam. No
-markdown headings. End every reply with a single concrete next action (verb + object +
-timeframe) UNLESS you're just confirming a tool call.
+Warm, direct, human. Short sentences. No emoji spam. No markdown headings.
+Challenge weak plans, celebrate real progress.
 
 # USER CONTEXT (live data — reference specifically, don't speak in generalities)
+Today is {today_date}. Tomorrow is {tomorrow_date}.
+
 {context}
 
 # HARD RULES
@@ -563,8 +600,9 @@ async def _build_coach_context(user: User) -> str:
                             for t in st["micro_tasks"]:
                                 mark = "[x]" if t.get("completed") else "[ ]"
                                 mood = f" mood={t.get('mood_today')}" if t.get("mood_today") else ""
+                                sched = f" scheduled={t.get('scheduled_date')}" if t.get("scheduled_date") else ""
                                 lines.append(
-                                    f"          {mark} {t['task_id']}: {t['title']} ({t['duration_minutes']}m){mood}"
+                                    f"          {mark} {t['task_id']}: {t['title']} ({t['duration_minutes']}m){mood}{sched}"
                                 )
     if recent:
         lines.append("\nRecent activity (newest first):")
@@ -600,7 +638,21 @@ async def coach_chat(body: ChatRequest, user: User = Depends(get_current_user)):
     history = list(reversed([m async for m in history_cursor]))
 
     context = await _build_coach_context(user)
-    system_prompt = COACH_SYSTEM_PROMPT.format(user_name=user.name, context=context)
+    today = _now().date()
+    tomorrow = today + timedelta(days=1)
+    # Pick the user's first active goal for example_goal_id, else a placeholder.
+    first_goal = await db.goals.find_one(
+        {"user_id": user.user_id, "status": {"$in": ["active", "paused"]}},
+        {"_id": 0, "goal_id": 1},
+    )
+    example_goal_id = first_goal["goal_id"] if first_goal else "goal_xxx"
+    system_prompt = COACH_SYSTEM_PROMPT.format(
+        user_name=user.name,
+        context=context,
+        today_date=today.isoformat(),
+        tomorrow_date=tomorrow.isoformat(),
+        example_goal_id=example_goal_id,
+    )
 
     # Load prior turns so Claude has the full thread.
     prior_cursor = (
@@ -612,7 +664,55 @@ async def coach_chat(body: ChatRequest, user: User = Depends(get_current_user)):
         .limit(20)
     )
     prior_msgs = list(reversed([m async for m in prior_cursor]))
-    initial_messages = [
+
+    # Few-shot priming: prepend synthetic assistant examples BEFORE real history.
+    # When Claude sees its "own previous messages" emit the <action> tag format,
+    # it pattern-matches and reliably emits them on the new turn. System-prompt
+    # instructions alone aren't enough — Claude treats them as roleplay and
+    # fakes the action in prose. Assistant-authored demos break that pattern.
+    fewshot_task_id = "t-FEWSHOT-1"
+    fewshot_goal_id = example_goal_id
+    fewshot = [
+        {
+            "role": "user",
+            "content": "(Earlier in this conversation — example pattern) I just finished my mobility task (t-FEWSHOT-1). It felt great.",
+        },
+        {
+            "role": "assistant",
+            "content": (
+                "Nice — mobility work compounds fast. Logging it.\n"
+                f'<action>{{"tool": "complete_micro_task", "args": {{"task_id": "{fewshot_task_id}"}}}}</action>\n'
+                f'<action>{{"tool": "log_mood", "args": {{"task_id": "{fewshot_task_id}", "mood": "great"}}}}</action>\n'
+                "Keep the streak going — do the same tomorrow."
+            ),
+        },
+        {
+            "role": "user",
+            "content": "(Earlier example) Push my reading task (t-FEWSHOT-1) to tomorrow.",
+        },
+        {
+            "role": "assistant",
+            "content": (
+                "Done.\n"
+                f'<action>{{"tool": "reschedule_task", "args": {{"task_id": "{fewshot_task_id}", "scheduled_date": "{tomorrow.isoformat()}"}}}}</action>\n'
+                "One slip is nothing — don't let it become two."
+            ),
+        },
+        {
+            "role": "user",
+            "content": "(Earlier example) Save a note: sleep over grind.",
+        },
+        {
+            "role": "assistant",
+            "content": (
+                "Saving it.\n"
+                f'<action>{{"tool": "create_note", "args": {{"title": "Sleep over grind", "content": "sleep over grind", "goal_id": "{fewshot_goal_id}"}}}}</action>\n'
+                "That's a principle worth protecting — sleep tonight."
+            ),
+        },
+    ]
+
+    initial_messages = fewshot + [
         {"role": m["role"], "content": m["content"]} for m in prior_msgs
     ]
 
@@ -1011,13 +1111,13 @@ async def _generate_and_save_path(
             "=== END TRANSCRIPT ==="
         )
 
-        # Model rotation: try a diverse set so provider-specific outages don't
-        # block us. Fast JSON generators first; heavier reasoners as fallback.
+        # Model rotation: Claude first (primary brain of the app), then
+        # fast fallbacks if Claude's gateway hiccups.
         MODEL_ATTEMPTS = [
+            ("anthropic", "claude-sonnet-4-6"),
+            ("openai", "gpt-4o"),
             ("openai", "gpt-4o-mini"),
             ("gemini", "gemini-2.0-flash"),
-            ("openai", "gpt-4o"),
-            ("anthropic", "claude-sonnet-4-6"),
         ]
         last_exc: Exception | None = None
         path_json: dict[str, Any] | None = None
@@ -1301,31 +1401,80 @@ async def next_micro_task(goal_id: str, user: User = Depends(get_current_user)):
 
 TOOL_CALL_PATTERN = re.compile(r"<action>\s*(\{.*?\})\s*</action>", re.DOTALL)
 
-TOOL_SYSTEM_PROMPT_SUFFIX = """
+VALID_MOODS = {"great", "ok", "drained"}
+ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
-AVAILABLE TOOLS
-You can take real actions by emitting tool calls inline. Use tools ONLY when the
-user explicitly asks for something actionable. After any user-facing prose, emit
-each tool call on its own line:
+_WEEKDAYS = {
+    "monday": 0, "mon": 0,
+    "tuesday": 1, "tue": 1, "tues": 1,
+    "wednesday": 2, "wed": 2,
+    "thursday": 3, "thu": 3, "thur": 3, "thurs": 3,
+    "friday": 4, "fri": 4,
+    "saturday": 5, "sat": 5,
+    "sunday": 6, "sun": 6,
+}
 
-<action>{"tool": "create_note", "args": {"title": "...", "content": "...", "goal_id": "goal_xxx"}}</action>
-<action>{"tool": "toggle_task", "args": {"task_id": "t-1-1-1-1", "completed": true, "mood_today": "great"}}</action>
 
-The user never sees the <action> blocks (stripped server-side). They DO see a
-small confirmation chip like "✓ Created note 'Workout log'" so they know what
-happened. Confirm intent in prose first, THEN emit the call.
+def _normalize_date(raw: str) -> str | None:
+    """Accept ISO (YYYY-MM-DD) or natural-language relative dates Claude might
+    emit ('today', 'tomorrow', 'next monday', 'saturday'). Returns ISO string
+    or None if it can't parse."""
+    if not raw:
+        return None
+    s = raw.strip().lower()
+    today = _now().date()
+    if ISO_DATE_RE.match(s):
+        return s
+    if s in {"today", "now"}:
+        return today.isoformat()
+    if s == "tomorrow":
+        return (today + timedelta(days=1)).isoformat()
+    if s == "yesterday":
+        return (today - timedelta(days=1)).isoformat()
+    if s in {"day after tomorrow", "day-after-tomorrow"}:
+        return (today + timedelta(days=2)).isoformat()
+    # "next <weekday>" or just "<weekday>" → next occurrence
+    m = re.match(r"^(?:next\s+)?([a-z]+)$", s)
+    if m and m.group(1) in _WEEKDAYS:
+        target = _WEEKDAYS[m.group(1)]
+        delta = (target - today.weekday()) % 7 or 7
+        return (today + timedelta(days=delta)).isoformat()
+    # +N days
+    m = re.match(r"^\+?(\d{1,3})\s*d(ays)?$", s)
+    if m:
+        return (today + timedelta(days=int(m.group(1)))).isoformat()
+    return None
 
-TOOL CATALOG
-- create_note(title, content, goal_id?) — saves a note; attach to a goal when relevant.
-- toggle_task(task_id, completed?, mood_today?) — marks a path micro-task complete;
-  optional mood_today one of: "great", "ok", "drained". Task IDs appear in the
-  user context below. Never invent IDs.
 
-RULES
-- Never fabricate IDs. If unsure, ask the user what they meant.
-- Don't emit more than 3 tool calls per turn.
-- Don't use tools speculatively — only when the user has clearly asked for them.
-"""
+async def _find_path_task(user_id: str, task_id: str) -> tuple[dict | None, dict | None]:
+    """Find the path and the micro-task doc for (user, task_id). Returns (path, task) or (None, None)."""
+    path = await db.paths.find_one(
+        {"user_id": user_id, "phases.milestones.steps.micro_tasks.task_id": task_id},
+        {"_id": 0},
+    )
+    if not path:
+        return None, None
+    for ph in path["phases"]:
+        for ms in ph["milestones"]:
+            for st in ms["steps"]:
+                for t in st["micro_tasks"]:
+                    if t["task_id"] == task_id:
+                        return path, t
+    return None, None
+
+
+async def _save_path_phases(path_id: str, phases: list) -> None:
+    total = sum(
+        1 for ph in phases for m in ph["milestones"] for s in m["steps"] for _ in s["micro_tasks"]
+    )
+    done = sum(
+        1 for ph in phases for m in ph["milestones"] for s in m["steps"]
+        for t in s["micro_tasks"] if t.get("completed")
+    )
+    progress = round((done / total) * 100) if total else 0
+    await db.paths.update_one(
+        {"path_id": path_id}, {"$set": {"phases": phases, "progress": progress}},
+    )
 
 
 async def _execute_tool_calls(
@@ -1342,60 +1491,146 @@ async def _execute_tool_calls(
             call = json.loads(m)
             tool = call.get("tool")
             args = call.get("args", {}) or {}
-            if tool == "create_note":
+
+            # ----- 1. complete_micro_task --------------------------------
+            if tool == "complete_micro_task":
+                task_id = args.get("task_id")
+                if not task_id:
+                    results.append({"tool": tool, "ok": False, "summary": "Missing task_id"})
+                    continue
+                path, task = await _find_path_task(user.user_id, task_id)
+                if not path or not task:
+                    results.append({"tool": tool, "ok": False, "summary": f"Task {task_id} not found"})
+                    continue
+                # Mutate in place inside path["phases"] and save.
+                for ph in path["phases"]:
+                    for ms in ph["milestones"]:
+                        for st in ms["steps"]:
+                            for t in st["micro_tasks"]:
+                                if t["task_id"] == task_id:
+                                    t["completed"] = True
+                                    t["completed_at"] = _now().isoformat()
+                await _save_path_phases(path["path_id"], path["phases"])
+                await _log_activity(
+                    user.user_id, "task.completed_by_coach",
+                    f"Coach completed: {task['title']}", {"task_id": task_id, "path_id": path["path_id"]},
+                )
+                results.append({
+                    "tool": tool, "ok": True,
+                    "summary": f"Marked “{task['title']}” complete",
+                    "task_id": task_id,
+                })
+
+            # ----- 2. log_mood --------------------------------------------
+            elif tool == "log_mood":
+                task_id = args.get("task_id")
+                mood = args.get("mood")
+                if not task_id or not mood:
+                    results.append({"tool": tool, "ok": False, "summary": "Missing task_id or mood"})
+                    continue
+                if mood not in VALID_MOODS:
+                    results.append({
+                        "tool": tool, "ok": False,
+                        "summary": f"Invalid mood '{mood}'. Must be one of {sorted(VALID_MOODS)}.",
+                    })
+                    continue
+                path, task = await _find_path_task(user.user_id, task_id)
+                if not path or not task:
+                    results.append({"tool": tool, "ok": False, "summary": f"Task {task_id} not found"})
+                    continue
+                for ph in path["phases"]:
+                    for ms in ph["milestones"]:
+                        for st in ms["steps"]:
+                            for t in st["micro_tasks"]:
+                                if t["task_id"] == task_id:
+                                    t["mood_today"] = mood
+                await _save_path_phases(path["path_id"], path["phases"])
+                await _log_activity(
+                    user.user_id, "mood.logged_by_coach",
+                    f"Coach logged mood '{mood}' on: {task['title']}",
+                    {"task_id": task_id, "mood": mood},
+                )
+                results.append({
+                    "tool": tool, "ok": True,
+                    "summary": f"Logged mood “{mood}” on “{task['title']}”",
+                    "task_id": task_id, "mood": mood,
+                })
+
+            # ----- 3. reschedule_task -------------------------------------
+            elif tool == "reschedule_task":
+                task_id = args.get("task_id")
+                scheduled_date_raw = args.get("scheduled_date")
+                if not task_id or not scheduled_date_raw:
+                    results.append({
+                        "tool": tool, "ok": False,
+                        "summary": "Missing task_id or scheduled_date (YYYY-MM-DD)",
+                    })
+                    continue
+                scheduled_date = _normalize_date(str(scheduled_date_raw))
+                if not scheduled_date:
+                    results.append({
+                        "tool": tool, "ok": False,
+                        "summary": f"Couldn't parse date '{scheduled_date_raw}'. Use YYYY-MM-DD.",
+                    })
+                    continue
+                path, task = await _find_path_task(user.user_id, task_id)
+                if not path or not task:
+                    results.append({"tool": tool, "ok": False, "summary": f"Task {task_id} not found"})
+                    continue
+                for ph in path["phases"]:
+                    for ms in ph["milestones"]:
+                        for st in ms["steps"]:
+                            for t in st["micro_tasks"]:
+                                if t["task_id"] == task_id:
+                                    t["scheduled_date"] = scheduled_date
+                await _save_path_phases(path["path_id"], path["phases"])
+                await _log_activity(
+                    user.user_id, "task.rescheduled_by_coach",
+                    f"Coach rescheduled '{task['title']}' to {scheduled_date}",
+                    {"task_id": task_id, "scheduled_date": scheduled_date},
+                )
+                results.append({
+                    "tool": tool, "ok": True,
+                    "summary": f"Moved “{task['title']}” to {scheduled_date}",
+                    "task_id": task_id, "scheduled_date": scheduled_date,
+                })
+
+            # ----- 4. create_note -----------------------------------------
+            elif tool == "create_note":
+                title = args.get("title") or "Untitled"
+                content = args.get("content") or ""
+                goal_id = args.get("goal_id")
+                if goal_id:
+                    # Validate goal belongs to user; if not, drop the link.
+                    goal_doc = await db.goals.find_one(
+                        {"goal_id": goal_id, "user_id": user.user_id}, {"_id": 0, "goal_id": 1},
+                    )
+                    if not goal_doc:
+                        goal_id = None
                 note_id = f"note_{uuid.uuid4().hex[:12]}"
                 await db.notes.insert_one({
                     "note_id": note_id, "user_id": user.user_id,
-                    "goal_id": args.get("goal_id"),
-                    "title": args.get("title", "Untitled"),
-                    "content": args.get("content", ""),
+                    "goal_id": goal_id,
+                    "title": title, "content": content,
                     "tags": ["from-coach"],
                     "created_at": _now(), "updated_at": _now(),
                 })
                 await _log_activity(
                     user.user_id, "note.created_by_coach",
-                    f"Coach created note: {args.get('title', 'Untitled')}",
-                    {"note_id": note_id, "goal_id": args.get("goal_id")},
+                    f"Coach created note: {title}",
+                    {"note_id": note_id, "goal_id": goal_id},
                 )
                 results.append({
                     "tool": tool, "ok": True,
-                    "summary": f"Created note “{args.get('title', 'Untitled')}”",
+                    "summary": f"Saved note “{title}”",
                     "note_id": note_id,
                 })
-            elif tool == "toggle_task":
-                task_id = args.get("task_id")
-                if not task_id:
-                    results.append({"tool": tool, "ok": False, "summary": "Missing task_id"})
-                    continue
-                path = await db.paths.find_one(
-                    {"user_id": user.user_id, "phases.milestones.steps.micro_tasks.task_id": task_id},
-                    {"_id": 0},
-                )
-                if not path:
-                    results.append({"tool": tool, "ok": False, "summary": f"Task {task_id} not found"})
-                    continue
-                phases = path["phases"]
-                hit_title = None
-                for ph in phases:
-                    for m2 in ph["milestones"]:
-                        for s in m2["steps"]:
-                            for t in s["micro_tasks"]:
-                                if t["task_id"] == task_id:
-                                    if "completed" in args:
-                                        t["completed"] = bool(args["completed"])
-                                    if "mood_today" in args:
-                                        t["mood_today"] = args["mood_today"]
-                                    hit_title = t["title"]
-                await db.paths.update_one(
-                    {"path_id": path["path_id"]}, {"$set": {"phases": phases}},
-                )
-                await _log_activity(
-                    user.user_id, "task.toggled_by_coach",
-                    f"Coach toggled: {hit_title}", {"task_id": task_id},
-                )
-                results.append({"tool": tool, "ok": True, "summary": f"Marked “{hit_title}” done"})
+
             else:
-                results.append({"tool": tool or "?", "ok": False, "summary": f"Unknown tool: {tool}"})
+                results.append({
+                    "tool": tool or "?", "ok": False,
+                    "summary": f"Unknown tool: {tool}",
+                })
         except Exception as exc:  # noqa: BLE001
             results.append({
                 "tool": call.get("tool") if isinstance(call, dict) else "?",

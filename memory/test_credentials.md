@@ -10,9 +10,9 @@ Emergent-managed Google OAuth. No password-based app accounts; sign-in flow:
 
 ## Active Test Identities (seeded directly in MongoDB for agent testing)
 
-| Purpose            | user_id                     | email                                       | session_token                    | name | Notes                              |
-|--------------------|-----------------------------|----------------------------------------------|----------------------------------|------|------------------------------------|
-| E2E coach/chat     | test-user-1776631129183     | test.1776631129183@example.com              | test_session_1776631129183       | Alex | Has 1 goal: "Run a half marathon" |
+| Purpose            | user_id                     | email                                       | session_token                    | name | Notes                                                            |
+|--------------------|-----------------------------|----------------------------------------------|----------------------------------|------|------------------------------------------------------------------|
+| E2E coach/chat     | test-user-1776631129183     | test.1776631129183@example.com              | test_session_1776631129183       | Alex | Has 1 goal: "Run a half marathon" (goal_26b83f2e6f28) + seeded path with micro-tasks t-1-1-1-1, t-1-1-1-2, t-1-1-2-1 |
 
 > These tokens are long-lived (7 days). If they expire, re-seed with the
 > snippet in `/app/auth_testing.md`.
