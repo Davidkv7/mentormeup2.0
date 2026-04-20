@@ -147,3 +147,46 @@ users, user_sessions, goals, chat_messages, activity_events
    calendar, goals, paths, notes" user requirement).
 2. Wire the Notes / Calendar APIs + migrate those pages.
 3. Activity logging from the UI so the coach sees navigation + reflections.
+
+### Session 4 — Intake Flow + Path Generation (shipped & confirmed working on mobile)
+- Added `POST /api/intake/chat` — runs Claude Sonnet 4.6 with the MentorOS intake system prompt,
+  enforces 5–7 question protocol, detects `[INTAKE_COMPLETE]` token.
+- Server-side dedup + force-close at turn 8 so Claude can't trap users in an endless interview.
+- Added background `_generate_and_save_path` task — on intake completion fires the Path Builder
+  prompt against a model fallback chain (gpt-4o-mini → gemini-2.0-flash → gpt-4o → claude-sonnet-4-6)
+  to survive gateway 502s / budget hiccups.
+- New `paths` collection with the full Goal → Phases → Milestones → Steps → Micro-tasks hierarchy
+  + `why_this_path` Trust Layer + `intake_summary` (starting_point, motivation, weekly_hours,
+  past_attempts, constraints, learning_style, **preferred_time_of_day**) + `streak_count: 0` at
+  goal level + `mood_today: null` on every micro-task.
+- `GET /api/paths/{goal_id}` + `POST /api/paths/{goal_id}/retry` + `GET /api/paths`.
+- Added proper prior-turn replay via `LlmChat.initial_messages` for BOTH intake and coach chat
+  (was a silent bug before — Claude saw only the current message).
+- Rebuilt `/app/intake/page.tsx` — real Claude conversation, "Building your path…" state,
+  polls `/api/paths/{goal_id}` and redirects to `/path?goal_id=…` when ready.
+- Rebuilt `/app/path/page.tsx` — renders the hierarchy with the Trust Layer card as a prominent
+  gradient-bordered hero at the top, 4 stat pills (duration / weekly / tasks / streak), expandable
+  phases/milestones, and per-micro-task `why_today` coaching line.
+
+### Session 4b — Auth robustness pass (Safari Private Mode + mobile UX)
+Shipped while iterating with the user on iOS Safari Private Mode:
+1. **Hydration-safe OAuth callback** — read URL hash only inside `useEffect`, module-level Set of
+   consumed `session_id`s to prevent React double-fire.
+2. **Server-side session_id dedup** — backend caches the Emergent→session_token mapping so a
+   concurrent/re-sent POST returns the same cookie instead of 401 (Emergent's session-data is
+   single-use and 404s on 2nd call).
+3. **CORS regex** — `https://.*\.(emergentagent\.com|emergentcf\.cloud)$` — preview proxy routes
+   from `*.emergentagent.com` to `*.emergentcf.cloud` internally; the old explicit allow-list
+   blocked the route.
+4. **Relative API URLs** — API calls use same-origin paths so cookies are first-party to whatever
+   preview hostname the user is on (e.g. `mentor-hub-141.preview.emergentagent.com`).
+5. **Bearer-token auth in localStorage** — the REAL fix for Safari Private Mode. Backend already
+   accepted `Authorization: Bearer`; frontend now stores the `session_token` in localStorage on
+   login, sends it on every request, clears it on 401. Cookies still used as a belt-and-braces
+   fallback for non-private browsers.
+6. **Mobile layout fixes** — intake/coach inputs were hidden behind the bottom tab bar and Safari's
+   URL bar. Moved to `bottom-[72px]` above mobile nav, added `env(safe-area-inset-bottom)` padding,
+   switched full-height drawer from `h-screen` → `h-[100dvh]`, bumped coach orb above the nav.
+
+Confirmed on iPhone Safari Private Mode: login → intake conversation → "Building your path…" →
+redirect to `/path` with Trust Layer card rendering correctly.
