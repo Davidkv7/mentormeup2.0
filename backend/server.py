@@ -439,6 +439,539 @@ async def _load_preferences(user: User) -> UserPreferences:
     return UserPreferences(**base)
 
 
+# =====================================================================
+# USER MODEL — silent, always-updating behavioural profile
+# =====================================================================
+#
+# One `user_model` doc per user. Updated inline (no LLM calls) after every
+# task completion, mood log, coach message, nudge, and goal status change.
+# At coach-chat time, `_build_behavioral_profile_lines` formats the fields
+# with enough signal (n≥5) into a natural-language block that gets
+# injected into the system prompt. Fields below the threshold are
+# omitted — we never guess.
+#
+USER_MODEL_MIN_SIGNAL = 5          # global n threshold per field
+LANGUAGE_TONE_WINDOW = 30          # last N user messages (recency > history)
+
+# Simple deterministic keyword scorers. Updated via running avg over the
+# last LANGUAGE_TONE_WINDOW user messages (stored as a short array on the
+# user_model doc).
+_TONE_KEYWORDS: dict[str, tuple[str, ...]] = {
+    "analytical": (
+        "metric", "number", "framework", "data", "analyze", "analyse",
+        "plan", "strategy", "optimize", "efficient", "system", "track",
+        "measure", "process", "compare", "evaluate",
+    ),
+    "emotional": (
+        "feel", "scared", "anxious", "tired", "worried", "stuck", "sad",
+        "hope", "love", "hate", "frustrated", "overwhelmed", "exhausted",
+        "doubt", "afraid", "joy", "nervous", "lonely", "angry", "upset",
+    ),
+    "action_oriented": (
+        "do", "ship", "finish", "start", "move", "build", "execute",
+        "launch", "now", "next", "today", "tomorrow", "tonight", "make",
+        "complete", "run", "push",
+    ),
+}
+
+
+def _score_tone(text: str) -> dict[str, float]:
+    """Return {analytical, emotional, action_oriented} weights summing to 1.0
+    for this one message. Ties broken by even split."""
+    low = text.lower()
+    scores = {k: 0.0 for k in _TONE_KEYWORDS}
+    for k, words in _TONE_KEYWORDS.items():
+        for w in words:
+            if w in low:
+                scores[k] += 1.0
+    total = sum(scores.values())
+    if total == 0:
+        return {k: 1 / 3 for k in scores}
+    return {k: v / total for k, v in scores.items()}
+
+
+def _infer_task_kind(title: str) -> str:
+    """Deterministic categorisation of a task for skip_patterns."""
+    t = title.lower()
+    if any(w in t for w in ("read", "article", "chapter", "book", "paper", "docs")):
+        return "reading"
+    if any(w in t for w in ("watch", "video", "course", "tutorial", "lecture")):
+        return "watching"
+    if any(w in t for w in ("write", "draft", "journal", "note", "essay", "outline")):
+        return "writing"
+    return "doing"
+
+
+def _new_user_model_doc(user_id: str) -> dict[str, Any]:
+    return {
+        "user_id": user_id,
+        "events_observed": 0,
+        "actual_completion_times": {
+            "hourly_histogram": {str(h): 0 for h in range(24)},
+            "sample_size": 0,
+        },
+        "skip_patterns": {"by_kind": {}, "total_assigned": 0, "total_skipped": 0},
+        "response_to_tone": {},
+        "session_samples": [],     # last 100 msg timestamps for session_length calc
+        "language_tone_window": [],  # list of {"a":..,"e":..,"o":..} weights, len<=30
+        "dropout_risk_score": {"value": 0.0, "computed_at": None},
+        "fastest_progress_weeks": {},  # iso_week -> {completed:int, tone:str, peak_hour:int}
+        "goal_completion_pattern": {
+            "completed_goals": 0,
+            "abandoned_goals": 0,
+            "furthest_phase_reached": 0,
+            "phases_completed_on_abandon": [],  # list[int]
+            "abandonment_triggers": {},  # {phase_transition: N, mid_phase: N, first_week: N}
+        },
+        "created_at": _now(),
+        "updated_at": _now(),
+    }
+
+
+async def _get_user_model(user_id: str) -> dict[str, Any]:
+    doc = await db.user_model.find_one({"user_id": user_id}, {"_id": 0})
+    if doc:
+        return doc
+    fresh = _new_user_model_doc(user_id)
+    await db.user_model.insert_one(fresh.copy())
+    return fresh
+
+
+async def _user_model_save(user_id: str, model: dict[str, Any]) -> None:
+    model["updated_at"] = _now()
+    await db.user_model.update_one(
+        {"user_id": user_id}, {"$set": model}, upsert=True,
+    )
+
+
+async def _get_user_timezone(user_id: str) -> str:
+    prefs = await db.user_preferences.find_one({"user_id": user_id}, {"_id": 0, "timezone": 1})
+    return (prefs or {}).get("timezone") or "UTC"
+
+
+async def _local_hour_now(user_id: str) -> int:
+    tz_name = await _get_user_timezone(user_id)
+    try:
+        tz = ZoneInfo(tz_name)
+    except ZoneInfoNotFoundError:
+        tz = timezone.utc
+    return _now().astimezone(tz).hour
+
+
+def _iso_week_of(dt: datetime) -> str:
+    y, w, _ = dt.isocalendar()
+    return f"{y}-W{w:02d}"
+
+
+async def _was_nudge_within_24h(user_id: str) -> tuple[bool, str | None]:
+    """Was a proactive nudge (struggle or evening) sent to this user in the
+    last 24h? Returns (yes, user's coaching_style at time of answer)."""
+    cutoff = _now() - timedelta(hours=24)
+    doc = await db.chat_messages.find_one(
+        {
+            "user_id": user_id, "role": "assistant",
+            "kind": {"$in": list(PROACTIVE_KINDS)},
+            "created_at": {"$gte": cutoff},
+        },
+        {"_id": 0, "created_at": 1},
+        sort=[("created_at", -1)],
+    )
+    if not doc:
+        return False, None
+    prefs = await db.user_preferences.find_one(
+        {"user_id": user_id}, {"_id": 0, "coaching_style": 1},
+    )
+    return True, (prefs or {}).get("coaching_style") or "balanced"
+
+
+async def _user_model_on_task_completed(user_id: str, task: dict[str, Any]) -> None:
+    """Called after any task.completed event (toggle or coach tool)."""
+    try:
+        model = await _get_user_model(user_id)
+        hour = await _local_hour_now(user_id)
+        hist = model["actual_completion_times"]["hourly_histogram"]
+        hist[str(hour)] = int(hist.get(str(hour), 0)) + 1
+        model["actual_completion_times"]["sample_size"] = (
+            model["actual_completion_times"].get("sample_size", 0) + 1
+        )
+
+        # skip_patterns: this task was assigned + now completed (not skipped).
+        kind = _infer_task_kind(task.get("title", ""))
+        skips = model["skip_patterns"]["by_kind"].setdefault(
+            kind, {"assigned": 0, "skipped": 0},
+        )
+        skips["assigned"] = int(skips.get("assigned", 0)) + 1
+        model["skip_patterns"]["total_assigned"] = (
+            model["skip_patterns"].get("total_assigned", 0) + 1
+        )
+
+        # response_to_tone: count this completion against the tone in use at
+        # the time, only if a proactive nudge happened in the last 24h.
+        nudged, tone = await _was_nudge_within_24h(user_id)
+        if nudged and tone:
+            rt = model["response_to_tone"].setdefault(
+                tone, {"nudges_sent": 0, "completed_in_24h": 0},
+            )
+            rt["completed_in_24h"] = int(rt.get("completed_in_24h", 0)) + 1
+
+        # fastest_progress_weeks: tally completions by ISO week for later.
+        week = _iso_week_of(_now())
+        fw = model["fastest_progress_weeks"].setdefault(
+            week,
+            {"completed": 0, "tone_counts": {}, "peak_hour_counts": {str(h): 0 for h in range(24)}},
+        )
+        fw["completed"] = int(fw.get("completed", 0)) + 1
+        fw["peak_hour_counts"][str(hour)] = int(fw["peak_hour_counts"].get(str(hour), 0)) + 1
+        if tone:
+            fw["tone_counts"][tone] = int(fw["tone_counts"].get(tone, 0)) + 1
+
+        model["events_observed"] = int(model.get("events_observed", 0)) + 1
+        await _user_model_save(user_id, model)
+        await _user_model_recompute_dropout_risk(user_id)
+    except Exception:  # noqa: BLE001
+        pass  # never let a profile update fail the user-facing operation
+
+
+async def _user_model_on_task_skipped(user_id: str, task: dict[str, Any]) -> None:
+    """Count a skip when struggle detection confirms a task has been ignored."""
+    try:
+        model = await _get_user_model(user_id)
+        kind = _infer_task_kind(task.get("title", ""))
+        skips = model["skip_patterns"]["by_kind"].setdefault(
+            kind, {"assigned": 0, "skipped": 0},
+        )
+        skips["skipped"] = int(skips.get("skipped", 0)) + 1
+        skips["assigned"] = max(skips["skipped"], int(skips.get("assigned", 0)) + 1)
+        model["skip_patterns"]["total_skipped"] = (
+            model["skip_patterns"].get("total_skipped", 0) + 1
+        )
+        await _user_model_save(user_id, model)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+async def _user_model_on_user_message(user_id: str, text: str) -> None:
+    """User-turn hook: updates language_tone (rolling window of 30) and
+    session timing samples (for average_session_length)."""
+    try:
+        model = await _get_user_model(user_id)
+        # Language tone: append score, cap at last 30.
+        score = _score_tone(text)
+        window = list(model.get("language_tone_window", []))
+        window.append({
+            "a": round(score["analytical"], 4),
+            "e": round(score["emotional"], 4),
+            "o": round(score["action_oriented"], 4),
+        })
+        window = window[-LANGUAGE_TONE_WINDOW:]
+        model["language_tone_window"] = window
+
+        # Session samples: keep last 120 message timestamps.
+        samples = list(model.get("session_samples", []))
+        samples.append(_now().isoformat())
+        samples = samples[-120:]
+        model["session_samples"] = samples
+        await _user_model_save(user_id, model)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+async def _user_model_on_nudge_sent(user_id: str, kind: str, tone: str | None) -> None:
+    try:
+        if not tone:
+            return
+        model = await _get_user_model(user_id)
+        rt = model["response_to_tone"].setdefault(
+            tone, {"nudges_sent": 0, "completed_in_24h": 0},
+        )
+        rt["nudges_sent"] = int(rt.get("nudges_sent", 0)) + 1
+        await _user_model_save(user_id, model)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _detect_abandon_trigger(path_doc: dict[str, Any] | None) -> tuple[str, int]:
+    """Return (trigger, phases_completed_count) inferred from the path state."""
+    if not path_doc:
+        return "mid_phase", 0
+    phases = path_doc.get("phases", []) or []
+    phases_fully_done: list[int] = []
+    for idx, ph in enumerate(phases):
+        all_done = True
+        any_done = False
+        for ms in ph.get("milestones", []) or []:
+            for st in ms.get("steps", []) or []:
+                for t in st.get("micro_tasks", []) or []:
+                    if t.get("completed"):
+                        any_done = True
+                    else:
+                        all_done = False
+            if not all_done:
+                break
+        if all_done and any_done:
+            phases_fully_done.append(idx)
+    completed_count = len(phases_fully_done)
+    # Trigger heuristic: if the user completed a phase fully but did ZERO
+    # tasks in the next phase, it's a phase_transition drop-off.
+    if completed_count > 0 and completed_count < len(phases):
+        next_phase = phases[completed_count]
+        next_any = any(
+            t.get("completed")
+            for ms in next_phase.get("milestones", [])
+            for st in ms.get("steps", [])
+            for t in st.get("micro_tasks", [])
+        )
+        if not next_any:
+            return "phase_transition", completed_count
+    # First-week drop-off: no phase completed and created < 7 days ago.
+    created = path_doc.get("created_at")
+    if completed_count == 0 and isinstance(created, datetime):
+        age_days = (_now() - created).days
+        if age_days <= 7:
+            return "first_week", 0
+    return "mid_phase", completed_count
+
+
+async def _user_model_on_goal_status_change(
+    user_id: str, goal_doc: dict[str, Any], new_status: str,
+) -> None:
+    try:
+        if new_status not in ("archived", "completed"):
+            return
+        model = await _get_user_model(user_id)
+        pattern = model["goal_completion_pattern"]
+        if new_status == "completed":
+            pattern["completed_goals"] = int(pattern.get("completed_goals", 0)) + 1
+        else:
+            pattern["abandoned_goals"] = int(pattern.get("abandoned_goals", 0)) + 1
+            path_doc = None
+            if goal_doc.get("path_id"):
+                path_doc = await db.paths.find_one(
+                    {"path_id": goal_doc["path_id"]}, {"_id": 0},
+                )
+            trigger, phases_done = _detect_abandon_trigger(path_doc)
+            pattern["phases_completed_on_abandon"] = (
+                list(pattern.get("phases_completed_on_abandon", [])) + [phases_done]
+            )
+            pattern["furthest_phase_reached"] = max(
+                int(pattern.get("furthest_phase_reached", 0)), phases_done,
+            )
+            trigs = pattern.setdefault("abandonment_triggers", {})
+            trigs[trigger] = int(trigs.get(trigger, 0)) + 1
+        await _user_model_save(user_id, model)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+async def _user_model_recompute_dropout_risk(user_id: str) -> None:
+    """Light formula — no ML. Factors: days since last activity, number of
+    incomplete tasks open, mood trend over last 7 days."""
+    try:
+        model = await _get_user_model(user_id)
+        last_evt = await db.activity_events.find_one(
+            {"user_id": user_id}, {"_id": 0, "created_at": 1},
+            sort=[("created_at", -1)],
+        )
+        days_since = 0.0
+        if last_evt and isinstance(last_evt.get("created_at"), datetime):
+            created = last_evt["created_at"]
+            if created.tzinfo is None:
+                created = created.replace(tzinfo=timezone.utc)
+            days_since = max(0.0, (_now() - created).total_seconds() / 86400)
+
+        # Incomplete open tasks across active goals.
+        incomplete = 0
+        async for goal in db.goals.find(
+            {"user_id": user_id, "status": "active"}, {"_id": 0, "path_id": 1},
+        ):
+            pid = goal.get("path_id")
+            if not pid:
+                continue
+            p = await db.paths.find_one({"path_id": pid}, {"_id": 0, "phases": 1})
+            if not p:
+                continue
+            for ph in p.get("phases", []) or []:
+                for ms in ph.get("milestones", []) or []:
+                    for st in ms.get("steps", []) or []:
+                        for t in st.get("micro_tasks", []) or []:
+                            if not t.get("completed"):
+                                incomplete += 1
+
+        # Mood trend: moods over last 7 days stored on path tasks.
+        moods_7d: list[str] = []
+        async for p in db.paths.find({"user_id": user_id}, {"_id": 0, "phases": 1}):
+            for ph in p.get("phases", []) or []:
+                for ms in ph.get("milestones", []) or []:
+                    for st in ms.get("steps", []) or []:
+                        for t in st.get("micro_tasks", []) or []:
+                            m = t.get("mood_today")
+                            if m:
+                                moods_7d.append(m)
+        trend = "flat"
+        if moods_7d:
+            weights = {"great": 3, "good": 2, "ok": 1, "meh": 0, "hard": -1, "drained": -2, "stuck": -2}
+            if len(moods_7d) >= 4:
+                first = sum(weights.get(m, 0) for m in moods_7d[: len(moods_7d) // 2])
+                second = sum(weights.get(m, 0) for m in moods_7d[len(moods_7d) // 2 :])
+                if second > first + 1:
+                    trend = "up"
+                elif second < first - 1:
+                    trend = "down"
+
+        # Final score 0..1. Weight days heaviest.
+        score = min(1.0, (days_since / 7.0) * 0.6 + min(incomplete, 20) / 20.0 * 0.25 + (0.15 if trend == "down" else 0.0))
+        model["dropout_risk_score"] = {
+            "value": round(score, 3),
+            "last_active_days_ago": round(days_since, 2),
+            "incomplete_open_tasks": incomplete,
+            "mood_trend_7d": trend,
+            "computed_at": _now(),
+        }
+        await _user_model_save(user_id, model)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _derive_profile_facts(model: dict[str, Any]) -> list[str]:
+    """Reduce raw user_model into the tight natural-language bullets we
+    inject into the system prompt. Only emit a line when the underlying
+    field has n >= USER_MODEL_MIN_SIGNAL."""
+    lines: list[str] = []
+
+    # Peak hour
+    ct = model.get("actual_completion_times", {}) or {}
+    if int(ct.get("sample_size", 0)) >= USER_MODEL_MIN_SIGNAL:
+        hist = {int(k): int(v) for k, v in (ct.get("hourly_histogram") or {}).items()}
+        peak_hour, peak_count = max(hist.items(), key=lambda kv: kv[1])
+        morning = sum(v for h, v in hist.items() if 5 <= h < 12)
+        evening = sum(v for h, v in hist.items() if 18 <= h < 24)
+        total = sum(hist.values()) or 1
+        if peak_count > 0:
+            ratio_desc = ""
+            if morning / total >= 0.55:
+                ratio_desc = f" (morning person, {round(morning/total*100)}% of completions 05–12)"
+            elif evening / total >= 0.55:
+                ratio_desc = f" (evening person, {round(evening/total*100)}% of completions 18–24)"
+            lines.append(f"- Peaks at: {peak_hour:02d}:00 local{ratio_desc}")
+
+    # Skip patterns
+    sp = (model.get("skip_patterns") or {}).get("by_kind") or {}
+    ranked = [
+        (k, v) for k, v in sp.items()
+        if int(v.get("assigned", 0)) >= USER_MODEL_MIN_SIGNAL
+    ]
+    if ranked:
+        ranked.sort(
+            key=lambda kv: (int(kv[1].get("skipped", 0)) / max(1, int(kv[1].get("assigned", 0)))),
+            reverse=True,
+        )
+        top_kind, top_stats = ranked[0]
+        top_rate = int(top_stats.get("skipped", 0)) / max(1, int(top_stats.get("assigned", 0)))
+        if top_rate >= 0.4:
+            lines.append(
+                f"- Weakest task type: {top_kind} ({round(top_rate*100)}% skip rate) — avoid suggesting this unless critical"
+            )
+
+    # Response to tone
+    rt = model.get("response_to_tone") or {}
+    eligible = {k: v for k, v in rt.items() if int(v.get("nudges_sent", 0)) >= USER_MODEL_MIN_SIGNAL}
+    if eligible:
+        def rate(v: dict[str, Any]) -> float:
+            # Cap at 1.0: the user can complete more than one task per nudge
+            # window (nudges_sent) but the success rate can't exceed 100%.
+            return min(1.0, int(v.get("completed_in_24h", 0)) / max(1, int(v.get("nudges_sent", 0))))
+        best_tone, best_stats = max(eligible.items(), key=lambda kv: rate(kv[1]))
+        lines.append(
+            f"- Responds best to: {best_tone} tone ({round(rate(best_stats)*100)}% completion within 24h of that tone)"
+        )
+
+    # Language tone (window-capped at last 30 messages)
+    window = list(model.get("language_tone_window") or [])
+    if len(window) >= USER_MODEL_MIN_SIGNAL:
+        avg = {
+            "analytical": sum(x["a"] for x in window) / len(window),
+            "emotional": sum(x["e"] for x in window) / len(window),
+            "action_oriented": sum(x["o"] for x in window) / len(window),
+        }
+        dom, dom_val = max(avg.items(), key=lambda kv: kv[1])
+        if dom_val >= 0.42:  # must actually dominate, not just barely lead
+            tone_prose = {
+                "analytical": "analytical-dominant — ground replies in metrics, frameworks, concrete steps",
+                "emotional": "emotional-dominant — acknowledge feeling first, then redirect to action",
+                "action_oriented": "action-oriented — skip preamble, go straight to what to do next",
+            }[dom]
+            lines.append(f"- Language style: {tone_prose} (last {len(window)} messages)")
+
+    # Dropout risk
+    dr = model.get("dropout_risk_score") or {}
+    val = dr.get("value")
+    if isinstance(val, (int, float)):
+        level = "LOW"
+        if val >= 0.66:
+            level = "HIGH"
+        elif val >= 0.33:
+            level = "MEDIUM"
+        days = dr.get("last_active_days_ago")
+        days_txt = f"{days:.1f}" if isinstance(days, (int, float)) else "?"
+        lines.append(
+            f"- Risk level: {level} ({val:.2f}) — last active {days_txt} days ago"
+        )
+
+    # Fastest progress conditions
+    weeks = model.get("fastest_progress_weeks") or {}
+    if weeks:
+        best_week, best_stats = max(
+            weeks.items(), key=lambda kv: int(kv[1].get("completed", 0)),
+        )
+        best_count = int(best_stats.get("completed", 0))
+        if best_count >= USER_MODEL_MIN_SIGNAL:
+            # Dominant tone + peak hour of that week.
+            tone_counts = best_stats.get("tone_counts") or {}
+            dom_tone = max(tone_counts.items(), key=lambda kv: kv[1])[0] if tone_counts else None
+            hc = best_stats.get("peak_hour_counts") or {}
+            peak_h = max(hc.items(), key=lambda kv: int(kv[1]))[0] if hc else None
+            parts = [f"{best_count} tasks completed"]
+            if peak_h is not None:
+                parts.append(f"mostly around {int(peak_h):02d}:00")
+            if dom_tone:
+                parts.append(f"{dom_tone}-tone coaching")
+            lines.append(f"- Fastest progress pattern: {', '.join(parts)}")
+
+    # Goal completion / abandonment pattern — the "danger zone" line.
+    gcp = model.get("goal_completion_pattern") or {}
+    trigs = gcp.get("abandonment_triggers") or {}
+    total_abandoned = int(gcp.get("abandoned_goals", 0))
+    if total_abandoned >= 1 and trigs:
+        top_trig, top_count = max(trigs.items(), key=lambda kv: kv[1])
+        if top_count >= 1 and top_count / total_abandoned >= 0.5:
+            labels = {
+                "phase_transition": "drops off at phase transitions — pre-empt with a bridging message before Phase {n} starts",
+                "first_week": "drops off within the first 7 days — the first week is the danger zone, reinforce consistency over intensity",
+                "mid_phase": "drops off mid-phase — attention flags mid-stream, suggest shorter bursts",
+            }
+            tmpl = labels.get(top_trig, "has a past drop-off pattern at this point")
+            next_phase_n = int(gcp.get("furthest_phase_reached", 0)) + 1
+            lines.append(f"- Danger zone: {tmpl.format(n=next_phase_n)}")
+
+    return lines
+
+
+async def _build_behavioral_profile_block(user_id: str) -> str:
+    """Returns the multi-line block for the coach system prompt, or an
+    empty string if there isn't enough signal yet."""
+    model = await db.user_model.find_one({"user_id": user_id}, {"_id": 0})
+    if not model:
+        return ""
+    facts = _derive_profile_facts(model)
+    if not facts:
+        return ""
+    body = "\n".join(facts)
+    return (
+        "# USER BEHAVIORAL PROFILE (live data — reference naturally, never announce)\n"
+        f"{body}\n"
+    )
+
+
 @app.get("/api/users/me/preferences", response_model=UserPreferences)
 async def get_preferences(user: User = Depends(get_current_user)):
     return await _load_preferences(user)
@@ -620,26 +1153,39 @@ async def update_goal(goal_id: str, body: GoalUpdate, user: User = Depends(get_c
     updates = {k: v for k, v in body.model_dump(exclude_unset=True).items() if v is not None}
     if not updates:
         raise HTTPException(status_code=400, detail="No fields to update")
-    result = await db.goals.update_one(
+    before = await db.goals.find_one(
+        {"goal_id": goal_id, "user_id": user.user_id}, {"_id": 0},
+    )
+    if not before:
+        raise HTTPException(status_code=404, detail="Goal not found")
+    await db.goals.update_one(
         {"goal_id": goal_id, "user_id": user.user_id},
         {"$set": updates},
     )
-    if result.matched_count == 0:
-        raise HTTPException(status_code=404, detail="Goal not found")
     await _log_activity(
         user.user_id,
         "goal.updated",
         f"Updated goal: {goal_id}",
         {"goal_id": goal_id, "updates": updates},
     )
+    # User model: track archive/completion as an abandonment/completion event.
+    new_status = updates.get("status")
+    if new_status and new_status != before.get("status") and new_status in ("archived", "completed"):
+        await _user_model_on_goal_status_change(user.user_id, before, new_status)
     return await db.goals.find_one({"goal_id": goal_id}, {"_id": 0})
 
 
 @app.delete("/api/goals/{goal_id}")
 async def delete_goal(goal_id: str, user: User = Depends(get_current_user)):
+    before = await db.goals.find_one(
+        {"goal_id": goal_id, "user_id": user.user_id}, {"_id": 0},
+    )
     result = await db.goals.delete_one({"goal_id": goal_id, "user_id": user.user_id})
     if result.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Goal not found")
+    # Deletion while goal was active/paused counts as abandonment.
+    if before and before.get("status") in ("active", "paused"):
+        await _user_model_on_goal_status_change(user.user_id, before, "archived")
     await _log_activity(
         user.user_id, "goal.deleted", f"Deleted goal: {goal_id}", {"goal_id": goal_id}
     )
@@ -673,6 +1219,8 @@ async def toggle_task(goal_id: str, task_id: str, user: User = Depends(get_curre
         f"{'Completed' if toggled['completed'] else 'Re-opened'} task: {toggled['title']}",
         {"goal_id": goal_id, "task_id": task_id},
     )
+    if toggled["completed"]:
+        await _user_model_on_task_completed(user.user_id, toggled)
     return await db.goals.find_one({"goal_id": goal_id}, {"_id": 0})
 
 
@@ -781,7 +1329,7 @@ Challenge weak plans, celebrate real progress.
 # SCHEDULING PREFERENCE (when suggesting *when* to do something)
 {preferred_work_time_note}
 
-# USER CONTEXT (live data — reference specifically, don't speak in generalities)
+{behavioral_profile_block}# USER CONTEXT (live data — reference specifically, don't speak in generalities)
 Today is {today_date}. Tomorrow is {tomorrow_date}.
 
 {context}
@@ -898,6 +1446,8 @@ async def _prepare_coach_turn(user: User, message: str) -> dict[str, Any]:
             "created_at": user_created_at,
         }
     )
+    # User-turn hook: updates language_tone window + session samples.
+    await _user_model_on_user_message(user.user_id, message)
 
     context = await _build_coach_context(user)
     today = _now().date()
@@ -915,6 +1465,7 @@ async def _prepare_coach_turn(user: User, message: str) -> dict[str, Any]:
     preferred_work_time_note = PREFERRED_WORK_TIME_DESCRIPTIONS.get(
         prefs.preferred_work_time, PREFERRED_WORK_TIME_DESCRIPTIONS["flexible"]
     )
+    behavioral_profile_block = await _build_behavioral_profile_block(user.user_id)
     system_prompt = COACH_SYSTEM_PROMPT.format(
         user_name=user.name,
         context=context,
@@ -923,6 +1474,7 @@ async def _prepare_coach_turn(user: User, message: str) -> dict[str, Any]:
         example_goal_id=example_goal_id,
         coaching_style_note=coaching_style_note,
         preferred_work_time_note=preferred_work_time_note,
+        behavioral_profile_block=behavioral_profile_block,
     )
 
     prior_cursor = (
@@ -1216,6 +1768,7 @@ async def coach_debug_system_prompt(user: User = Depends(get_current_user)):
     preferred_work_time_note = PREFERRED_WORK_TIME_DESCRIPTIONS.get(
         prefs.preferred_work_time, PREFERRED_WORK_TIME_DESCRIPTIONS["flexible"]
     )
+    behavioral_profile_block = await _build_behavioral_profile_block(user.user_id)
     prompt = COACH_SYSTEM_PROMPT.format(
         user_name=user.name,
         context=context,
@@ -1224,12 +1777,14 @@ async def coach_debug_system_prompt(user: User = Depends(get_current_user)):
         example_goal_id=example_goal_id,
         coaching_style_note=coaching_style_note,
         preferred_work_time_note=preferred_work_time_note,
+        behavioral_profile_block=behavioral_profile_block,
     )
     return {
         "system_prompt": prompt,
         "preferences": prefs.model_dump(),
         "coaching_style_note": coaching_style_note,
         "preferred_work_time_note": preferred_work_time_note,
+        "behavioral_profile_block": behavioral_profile_block,
     }
 
 
@@ -1971,6 +2526,8 @@ async def toggle_path_task(
         f"Task {'completed' if body.completed else 'updated'}: {found_title}",
         {"goal_id": goal_id, "task_id": task_id, "mood_today": body.mood_today},
     )
+    if body.completed and found_title:
+        await _user_model_on_task_completed(user.user_id, {"title": found_title})
     return await db.paths.find_one({"goal_id": goal_id}, {"_id": 0})
 
 
@@ -2117,6 +2674,7 @@ async def _execute_tool_calls(
                     user.user_id, "task.completed_by_coach",
                     f"Coach completed: {task['title']}", {"task_id": task_id, "path_id": path["path_id"]},
                 )
+                await _user_model_on_task_completed(user.user_id, task)
                 results.append({
                     "tool": tool, "ok": True,
                     "summary": f"Marked “{task['title']}” complete",
@@ -2380,6 +2938,10 @@ async def _process_evening_checkin_for_user(user_doc: dict[str, Any]) -> bool:
         "kind": "evening_checkin",
         "created_at": _now(),
     })
+    # User model: count this evening nudge against the current coaching tone.
+    await _user_model_on_nudge_sent(
+        user_id, "evening_checkin", prefs_doc.get("coaching_style") or "balanced",
+    )
     await db.user_state.update_one(
         {"user_id": user_id},
         {"$set": {
@@ -2583,6 +3145,16 @@ async def _process_struggle_for_user(user_doc: dict[str, Any]) -> dict[str, Any]
         "kind": "struggle_nudge",
         "created_at": _now(),
     })
+    # User model: count this nudge against the current coaching tone +
+    # register a "skip" against this task's kind (the user is avoiding it).
+    prefs_for_tone = await db.user_preferences.find_one(
+        {"user_id": user_id}, {"_id": 0, "coaching_style": 1},
+    )
+    await _user_model_on_nudge_sent(
+        user_id, "struggle_nudge",
+        (prefs_for_tone or {}).get("coaching_style") or "balanced",
+    )
+    await _user_model_on_task_skipped(user_id, stuck_task)
     # Stamp so we don't nudge again for this task in the same window.
     last_nudges[task_id] = _now().isoformat()
     await db.user_state.update_one(

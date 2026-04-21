@@ -174,6 +174,46 @@ MongoDB: users, user_sessions, user_state, goals, paths, chat_messages,
   triggered React minified error #310 ("change in the order of Hooks").
   Moved them above the early return.
 
+### Session 11 — User Model (silent hyper-personalization)
+- **New `user_model` collection** — one doc per user, 8 top-level fields:
+  `actual_completion_times`, `skip_patterns`, `response_to_tone`,
+  `average_session_length` (via `session_samples`),
+  `dropout_risk_score`, `language_tone_window` (capped last 30 msgs —
+  recency > history, per explicit direction), `fastest_progress_weeks`,
+  `goal_completion_pattern` (with `abandonment_triggers` dict:
+  `phase_transition` | `first_week` | `mid_phase`).
+- **All updates are inline, no LLM calls** — small Mongo upserts from
+  existing event handlers:
+  - `task.completed` (toggle + coach tool) → histogram + skip_patterns
+    assigned + response_to_tone completed_in_24h + fastest_progress_weeks
+    + dropout_risk recompute
+  - `struggle_nudge` + `evening_checkin` → `response_to_tone.{tone}.nudges_sent`
+    (+ skip_patterns skipped for struggle)
+  - user coach message → `language_tone_window` (rolling 30) +
+    `session_samples`
+  - goal PATCH to `archived`/`completed` or DELETE on active/paused →
+    `goal_completion_pattern` with trigger detection
+  (Failures swallowed — profile updates never block user-facing ops.)
+- **`_build_behavioral_profile_block`** formats fields with
+  `n >= USER_MODEL_MIN_SIGNAL` (5) into natural-language bullets and
+  injects them as a new `USER BEHAVIORAL PROFILE` section in the coach
+  system prompt, positioned between `SCHEDULING PREFERENCE` and
+  `USER CONTEXT`. Fields below threshold are omitted, never guessed.
+- **Danger-zone line** (the highest-leverage insight, explicitly
+  requested): emitted when `abandoned_goals >= 1` and one trigger holds
+  ≥50% share. e.g. `- Danger zone: drops off at phase transitions —
+  pre-empt with a bridging message before Phase 2 starts`.
+- **Verification done** — seeded user with signal on every field, sent
+  a live coach message. Claude's reply:
+  *"You finished Phase 1. That's real — five tasks done, **all before
+  9am**. The anxiety didn't stop you, it just rode along."* —
+  references peak-hour + emotional language style without announcing
+  the profile.
+- **Bug fix**: `dropout_risk_score` recompute made timezone-aware
+  (some legacy `activity_events.created_at` were offset-naive).
+- **Rate cap**: `response_to_tone.*.rate` capped at 100% (a user can
+  complete multiple tasks per nudge window).
+
 ## What's Been Implemented
 
 ### Sessions 1–4 — Foundation
