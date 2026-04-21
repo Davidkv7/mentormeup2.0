@@ -7,7 +7,7 @@ import time
 import urllib.request
 import uuid
 
-BASE = "https://a0364a8f-3654-4c6f-a5ea-4b264d1b18e2.preview.emergentagent.com"
+BASE = "https://mentormeup.preview.emergentagent.com"
 
 
 def seed_user() -> tuple[str, str]:
