@@ -1,0 +1,81 @@
+{
+  "summary": "Session B (Multi-path selector with Tavily) E2E tested. 9/16 backend tests pass. 2 critical backend bugs found: (1) POST /api/paths/build-options/{goal_id} returns 500 on cache hit due to naive-vs-aware datetime comparison, (2) EMERGENT_LLM_KEY budget is exhausted causing GPT-4o fallback to fail. Frontend /path/select and /path pages render correctly with all Session B UI elements (coach pick, angle chips, sources footer, change-path link, 24h countdown).",
+  "backend_issues": {
+    "critical": [
+      {
+        "endpoint": "POST /api/paths/build-options/{goal_id}",
+        "issue": "Returns 500 whenever a cached path_options doc exists. Stack: 'TypeError: can't compare offset-naive and offset-aware datetimes' at server.py:2712 (`expires > _now()`). `cache_expires_at` is stored by Mongo as offset-naive but `_now()` is timezone-aware. This fires on EVERY /path/select page load because the frontend hits build-options to refresh.",
+        "priority": "CRITICAL"
+      },
+      {
+        "endpoint": "LLM infra (affects /api/paths/select-option, /api/coach/chat, etc.)",
+        "issue": "EMERGENT_LLM_KEY budget exceeded: 'Budget has been exceeded! Current cost: 5.05072385, Max budget: 5.000999999999999'. Causes GPT-4o fallback (attempt 2) to 400 out. gpt-4o-mini (attempt 3) still works but path expansion is flaky — about half of the runs during testing did not complete within 120s.",
+        "priority": "CRITICAL"
+      }
+    ],
+    "minor": [
+      {
+        "endpoint": "POST /api/paths/build-options (claude attempt 1)",
+        "issue": "Claude Sonnet 4.6 intermittently returns 502 BadGateway (litellm). Fallback chain recovers but adds 30-60s latency. Expected per main-agent note."
+      }
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [
+      {
+        "flow": "/path/select page load",
+        "issue": "Browser console shows 500 from /api/paths/build-options/{goal_id} on mount (caused by backend datetime bug above). UI still renders because GET options succeeds, but the refresh/cache-warming call is broken.",
+        "affected_selectors": ["/path/select page mount"]
+      }
+    ],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_session_b_paths.py",
+    "/app/backend/tests/test_mentormeup_api.py",
+    "/app/test_reports/pytest/session_b_results.xml"
+  ],
+  "action_items": [
+    "Fix server.py:2712 — normalize `expires` to timezone-aware before comparison. e.g. `if isinstance(expires, datetime): if expires.tzinfo is None: expires = expires.replace(tzinfo=timezone.utc); if expires > _now(): ...`. This is blocking cache-hit behavior entirely.",
+    "Top up or rotate EMERGENT_LLM_KEY budget — currently at $5.05/$5.00. Without this, select-option path expansion is flaky and will fail for most users.",
+    "Consider adding a cheaper/faster fallback model ordering so gpt-4o-mini is tried before gpt-4o (which is currently over budget).",
+    "No frontend code changes needed — UI looks correct."
+  ],
+  "critical_code_review_comments": [
+    "server.py:2712 `expires > _now()` — classic naive/aware datetime bug. Mongo returns datetimes without tzinfo by default; always normalize on read.",
+    "server.py:2722 `asyncio.create_task(_generate_and_save_path_options(...))` — task is not retained; if it raises before first await, exception is swallowed. Consider logging task exceptions via a done_callback.",
+    "server.py:2783 same pattern for _expand_option_to_path — unreferenced tasks can be garbage-collected mid-flight under memory pressure; store references on a module-level set.",
+    "The cache-hit branch in build-options does NOT reset `intake_error` field while the cold branch does (`$unset: intake_error`). Inconsistent state if a previous generation errored.",
+    "No rate-limiting on build-options. A malicious user could spam the endpoint; each cold call costs 3 Tavily requests + 1 Claude call."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_mentormeup_api.py",
+    "/app/backend/tests/test_session_b_paths.py"
+  ],
+  "success_rate": {
+    "backend": "56% (9/16 Session B tests pass; failures caused by the 2 critical bugs above, not by test scripts)",
+    "frontend": "100% (all /path/select and /path UI elements present and rendering; one non-blocking 500 in console from backend bug)"
+  },
+  "test_credentials": {
+    "seeded_user_token": "tok_e37755bfce254fa3a9b145924a874adf",
+    "seeded_user_goal": "goal_98615525 (has options + path already built)",
+    "fresh_seed_script": "/tmp/seed_test.py (creates new user + completed intake)"
+  },
+  "seed_data_creation": "Created fresh test users via /tmp/seed_test.py. Full options+path successfully built once (goal_056966f6 → path_40f117a5b98e via option-2 recommendation) proving happy-path works end-to-end when budget is OK.",
+  "retest_needed": true,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "After main agent fixes the datetime bug at server.py:2712 and tops up the LLM key, rerun `pytest backend/tests/test_session_b_paths.py -v`. Expect all 16 tests to pass. The test file supports a module-scoped `fresh` fixture that seeds a user from scratch; the polling tests tolerate 60s for options and 120s for path expansion. Frontend UI rendering was already verified end-to-end with screenshots so backend re-test is sufficient.",
+  "rca of the issue": {
+    "bug_1_cache_hit_500": {
+      "reproduction": "curl -X POST -H 'Authorization: Bearer tok_e37755bfce254fa3a9b145924a874adf' https://mentormeup.preview.emergentagent.com/api/paths/build-options/goal_98615525 → 500 every time.",
+      "root_cause": "In build_path_options (server.py:2709-2716) `expires = existing.get('cache_expires_at')` returns a naive datetime from MongoDB; `_now()` returns timezone.utc-aware. Python raises TypeError on the `>` comparison, short-circuiting the 200-cache response.",
+      "mitigation": "Normalize: `if expires.tzinfo is None: expires = expires.replace(tzinfo=timezone.utc)` before the comparison. Alternatively, store `cache_expires_at` as ISO string or ensure insertion with tzinfo=UTC when writing."
+    },
+    "bug_2_budget_exhausted": {
+      "reproduction": "backend logs show `litellm.BadRequestError: Budget has been exceeded! Current cost: 5.05072385, Max budget: 5.000999999999999` on every gpt-4o fallback.",
+      "root_cause": "EMERGENT_LLM_KEY has a $5 monthly budget that has been consumed by prior testing. The fallback chain [claude-sonnet-4-6 → gpt-4o → gpt-4o-mini] now fails at step 2 and relies on step 3.",
+      "mitigation": "Top-up budget; or reorder fallbacks to prefer cheaper models when claude fails; or detect budget error explicitly and skip to mini."
+    }
+  }
+}

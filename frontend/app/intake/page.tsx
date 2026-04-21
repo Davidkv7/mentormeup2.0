@@ -7,7 +7,7 @@ import { Sparkles, Target, Send } from "lucide-react";
 import { SidebarNav } from "@/components/sidebar-nav";
 import { useTheme } from "@/contexts/theme-context";
 import { useGoals } from "@/contexts/goals-context";
-import { api, ApiError } from "@/lib/api";
+import { api } from "@/lib/api";
 
 interface IntakeMessage {
   message_id: string;
@@ -19,7 +19,14 @@ interface IntakeMessage {
 interface IntakeHistory {
   goal_id: string;
   goal_title: string;
-  intake_status: "not_started" | "in_progress" | "building_path" | "complete" | "failed";
+  intake_status:
+    | "not_started"
+    | "in_progress"
+    | "building_path"
+    | "building_options"
+    | "options_ready"
+    | "complete"
+    | "failed";
   path_id: string | null;
   messages: IntakeMessage[];
 }
@@ -61,7 +68,16 @@ export default function IntakePage() {
       setGoalTitle(h.goal_title);
       setMessages(h.messages);
       setIntakeStatus(h.intake_status);
-      // If we're already past the intake, jump ahead.
+      // If options have been generated (or are being generated), send the user
+      // to the multi-path selector instead of the old "building path" screen.
+      if (
+        h.intake_status === "building_options" ||
+        h.intake_status === "options_ready"
+      ) {
+        router.replace(`/path/select?goal_id=${goalId}`);
+        return;
+      }
+      // If we're already past the whole flow, jump straight to the path.
       if (h.intake_status === "complete" && h.path_id) {
         router.replace(`/path?goal_id=${goalId}`);
         return;
@@ -84,31 +100,17 @@ export default function IntakePage() {
     }
   }, [messages, sending]);
 
-  // When intake completes, poll for the built path then redirect.
+  // When intake completes, send them to the multi-path selector.
   useEffect(() => {
-    if (intakeStatus !== "building_path") return;
+    if (intakeStatus !== "building_options" && intakeStatus !== "building_path") return;
     if (!goalId) return;
-    let cancelled = false;
-    const poll = async () => {
-      for (let attempt = 0; attempt < 90; attempt++) {
-        if (cancelled) return;
-        try {
-          await api.get(`/api/paths/${goalId}`);
-          if (!cancelled) router.replace(`/path?goal_id=${goalId}`);
-          return;
-        } catch (err) {
-          if (err instanceof ApiError && (err.status === 404 || err.status === 502)) {
-            await new Promise((r) => setTimeout(r, 3000));
-            continue;
-          }
-          throw err;
-        }
-      }
-    };
-    void poll();
-    return () => {
-      cancelled = true;
-    };
+    // building_path still exists as a legacy state for anything that bypassed
+    // Session B — we redirect to /path in that case; otherwise /path/select.
+    const target =
+      intakeStatus === "building_path"
+        ? `/path?goal_id=${goalId}`
+        : `/path/select?goal_id=${goalId}`;
+    router.replace(target);
   }, [intakeStatus, goalId, router]);
 
   const handleSend = async (e: React.FormEvent) => {
@@ -144,7 +146,7 @@ export default function IntakePage() {
         },
       ]);
       if (res.intake_complete) {
-        setIntakeStatus("building_path");
+        setIntakeStatus("building_options");
       } else {
         setIntakeStatus("in_progress");
       }

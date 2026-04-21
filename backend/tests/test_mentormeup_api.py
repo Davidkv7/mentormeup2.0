@@ -7,7 +7,7 @@ import pytest
 import requests
 import time
 
-BASE_URL = os.environ.get('NEXT_PUBLIC_BACKEND_URL', '').rstrip('/')
+BASE_URL = (os.environ.get('NEXT_PUBLIC_BACKEND_URL') or os.environ.get('REACT_APP_BACKEND_URL') or 'https://mentormeup.preview.emergentagent.com').rstrip('/')
 TEST_TOKEN = "test_session_1776631129183"
 
 # Fixtures

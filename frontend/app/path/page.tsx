@@ -15,6 +15,8 @@ import {
   MessageCircle,
   Calendar,
   Flame,
+  ExternalLink,
+  RotateCcw,
 } from "lucide-react";
 import { SidebarNav } from "@/components/sidebar-nav";
 import { useTheme } from "@/contexts/theme-context";
@@ -52,6 +54,11 @@ interface Phase {
   estimated_weeks: number;
   milestones: Milestone[];
 }
+interface PathSource {
+  title: string;
+  url: string;
+  snippet: string;
+}
 interface Path {
   path_id: string;
   goal_id: string;
@@ -64,6 +71,13 @@ interface Path {
   phases: Phase[];
   status: string;
   created_at: string;
+  selected_option_id?: string;
+  selected_option_name?: string;
+  selected_option_angle?: string;
+  selected_option_tagline?: string;
+  coach_recommendation?: string;
+  sources?: PathSource[];
+  path_change_deadline?: string;
 }
 
 export default function PathPage() {
@@ -280,6 +294,8 @@ export default function PathPage() {
                       <Stat isDark={isDark} icon={<Target className="w-3.5 h-3.5 text-[#9D4EDD]" />} label="Tasks" value={`${totalTasks}`} />
                       <Stat isDark={isDark} icon={<Flame className="w-3.5 h-3.5 text-orange-500" />} label="Streak" value={`${path.streak_count}`} />
                     </div>
+
+                    <ChangePathLink path={path} goalId={goalId} isDark={isDark} />
                   </div>
                 </div>
               </motion.section>
@@ -430,6 +446,8 @@ export default function PathPage() {
                   );
                 })}
               </section>
+
+              <SourcesFooter path={path} isDark={isDark} />
             </>
           )}
         </div>
@@ -465,3 +483,99 @@ function Stat({
     </div>
   );
 }
+
+function ChangePathLink({ path, goalId, isDark }: { path: Path; goalId: string | null; isDark: boolean }) {
+  const deadline = path.path_change_deadline;
+  if (!deadline || !goalId || !path.selected_option_id) return null;
+  const deadlineMs = new Date(deadline).getTime();
+  const nowMs = Date.now();
+  if (!isFinite(deadlineMs) || deadlineMs <= nowMs) return null;
+  const hoursLeft = Math.max(1, Math.round((deadlineMs - nowMs) / 3_600_000));
+  return (
+    <div className="mt-4 flex items-center gap-2 flex-wrap" data-testid="change-path-link">
+      <Link
+        href={`/path/select?goal_id=${goalId}`}
+        className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full font-mono text-xs transition-colors ${
+          isDark
+            ? "bg-[rgba(255,255,255,0.04)] text-[rgba(255,255,255,0.75)] hover:bg-[rgba(255,255,255,0.08)] hover:text-white"
+            : "bg-[rgba(0,0,0,0.04)] text-[rgba(0,0,0,0.75)] hover:bg-[rgba(0,0,0,0.08)] hover:text-[#1A1D21]"
+        }`}
+      >
+        <RotateCcw className="w-3.5 h-3.5" />
+        Change path
+      </Link>
+      <span
+        className={`font-mono text-[11px] ${
+          isDark ? "text-[rgba(255,255,255,0.4)]" : "text-[rgba(0,0,0,0.5)]"
+        }`}
+      >
+        {hoursLeft}h left to switch
+      </span>
+      {path.selected_option_name && (
+        <span
+          className={`font-mono text-[11px] ${
+            isDark ? "text-[rgba(255,255,255,0.45)]" : "text-[rgba(0,0,0,0.55)]"
+          }`}
+        >
+          · picked {path.selected_option_name}
+        </span>
+      )}
+    </div>
+  );
+}
+
+function SourcesFooter({ path, isDark }: { path: Path; isDark: boolean }) {
+  const sources = path.sources ?? [];
+  if (sources.length === 0) return null;
+  return (
+    <section
+      className={`rounded-2xl p-5 border ${
+        isDark
+          ? "bg-[rgba(255,255,255,0.02)] border-[rgba(255,255,255,0.06)]"
+          : "bg-white border-[rgba(0,0,0,0.06)]"
+      }`}
+      data-testid="path-sources-footer"
+    >
+      <p
+        className={`font-mono text-[11px] uppercase tracking-[0.15em] mb-3 ${
+          isDark ? "text-[rgba(255,255,255,0.5)]" : "text-[rgba(0,0,0,0.5)]"
+        }`}
+      >
+        Research behind this path
+      </p>
+      <ul className="space-y-3">
+        {sources.map((s, i) => (
+          <li key={i} className="flex items-start gap-2">
+            <ExternalLink
+              className={`w-3.5 h-3.5 mt-1 shrink-0 ${
+                isDark ? "text-[rgba(255,255,255,0.45)]" : "text-[rgba(0,0,0,0.45)]"
+              }`}
+            />
+            <div className="min-w-0">
+              <a
+                href={s.url}
+                target="_blank"
+                rel="noopener noreferrer"
+                className={`font-sans font-medium text-sm hover:underline ${
+                  isDark ? "text-[#00D4FF]" : "text-[#0099CC]"
+                }`}
+              >
+                {s.title}
+              </a>
+              {s.snippet && (
+                <p
+                  className={`font-mono text-[11px] mt-0.5 leading-relaxed ${
+                    isDark ? "text-[rgba(255,255,255,0.5)]" : "text-[rgba(0,0,0,0.55)]"
+                  }`}
+                >
+                  {s.snippet}
+                </p>
+              )}
+            </div>
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+

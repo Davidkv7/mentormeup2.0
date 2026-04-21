@@ -2078,12 +2078,15 @@ async def intake_chat(body: IntakeChatRequest, user: User = Depends(get_current_
     )
 
     if intake_complete:
+        # Session B: fire multi-path options generation (Tavily + Claude).
+        # The /path/select page polls /api/paths/options/{goal_id}; once the
+        # user picks an option, /api/paths/select-option/{goal_id} expands it
+        # into a full path via PATH_BUILDER_SYSTEM_PROMPT.
         await db.goals.update_one(
-            {"goal_id": body.goal_id}, {"$set": {"intake_status": "building_path"}}
+            {"goal_id": body.goal_id}, {"$set": {"intake_status": "building_options"}}
         )
-        # Fire-and-forget: generate the path in the background.
         asyncio.create_task(
-            _generate_and_save_path(
+            _generate_and_save_path_options(
                 user_id=user.user_id,
                 user_name=user.name,
                 goal_id=body.goal_id,
@@ -2276,6 +2279,518 @@ async def list_paths(user: User = Depends(get_current_user)):
     )
     return [p async for p in cursor]
 
+
+
+# =====================================================================
+# SESSION B — MULTI-PATH OPTIONS WITH TAVILY WEB SEARCH
+# =====================================================================
+
+TAVILY_API_KEY = os.environ.get("TAVILY_API_KEY", "")
+PATH_OPTIONS_CACHE_DAYS = 7
+PATH_CHANGE_WINDOW_HOURS = 24
+
+PATH_OPTIONS_ANGLES = [
+    {
+        "angle_id": "evidence_based",
+        "label": "evidence-based framework",
+        "search_query_template": "evidence-based proven framework {goal} research methodology",
+        "option_prompt": "An approach grounded in established research, methodology, and best practices.",
+    },
+    {
+        "angle_id": "fastest",
+        "label": "fastest approach",
+        "search_query_template": "fastest way to {goal} intensive accelerated method",
+        "option_prompt": "The most compressed, high-intensity approach that gets results in minimum time.",
+    },
+    {
+        "angle_id": "sustainable",
+        "label": "sustainable long-term system",
+        "search_query_template": "sustainable habit long-term system {goal} balanced consistent",
+        "option_prompt": "A gentle, habit-first approach that fits into existing life rhythms without burnout.",
+    },
+]
+
+
+PATH_OPTIONS_SYSTEM_PROMPT = """You are the MentorOS path architect. You are given:
+- The user's goal and a summary of the intake conversation.
+- Their silent behavioral profile (if any signal exists).
+- 3 sets of real web-search results, one per "angle": (1) evidence-based framework,
+  (2) fastest approach, (3) sustainable long-term system.
+
+Your job: produce EXACTLY 3 path options — one per angle, in that order — that fit THIS user's
+situation. Pick exactly ONE as the recommended option based on their profile,
+constraints, and goal. Write a 1–2 sentence `coach_recommendation` explaining
+why you recommend it — speak directly to the user as their coach.
+
+NAMING GUARDRAIL (strict):
+Path names must be evocative but immediately legible — a brand-new user should
+understand the approach from the name alone in under 2 seconds.
+  Good: "The Steady Build", "Publish Before You're Ready", "The Research Sprint"
+  Bad:  "Quantum Momentum", "Pathway Synthesis", "Cognitive Resonance"
+
+Rules per option:
+- name: 2–4 words, concrete, no jargon, no abstractions, no "quantum/synergy/momentum/resonance/synthesis" buzzwords.
+- tagline: one sentence, <= 14 words, describes the core mechanic.
+- timeline: human string like "8 weeks", "10 weeks", "12 weeks".
+- intensity: "low" | "moderate" | "high".
+- why_this_fits: 2–3 sentences, reference at least ONE specific thing the user said in intake.
+- key_milestones: 3–5 short bullet strings (outcomes, not tasks).
+- sources: copy 2–3 of the most credible sources from THAT angle's search results
+  (title + url + 1-line snippet). If no results exist for an angle, sources is [].
+  Never invent URLs.
+
+OUTPUT (raw JSON object only, no prose, no markdown fences):
+{
+  "coach_recommendation": "1-2 sentences, second person.",
+  "recommended_option_id": "option-1" | "option-2" | "option-3",
+  "options": [
+    {
+      "option_id": "option-1",
+      "angle": "evidence_based",
+      "name": "...",
+      "tagline": "...",
+      "timeline": "... weeks",
+      "intensity": "low" | "moderate" | "high",
+      "why_this_fits": "...",
+      "key_milestones": ["...", "...", "..."],
+      "sources": [ {"title": "...", "url": "...", "snippet": "..."} ]
+    },
+    { "option_id": "option-2", "angle": "fastest", ... },
+    { "option_id": "option-3", "angle": "sustainable", ... }
+  ]
+}
+"""
+
+
+class PathSource(BaseModel):
+    title: str
+    url: str
+    snippet: str
+
+
+class PathOption(BaseModel):
+    option_id: str
+    angle: str
+    name: str
+    tagline: str
+    timeline: str
+    intensity: Literal["low", "moderate", "high"]
+    why_this_fits: str
+    key_milestones: list[str]
+    sources: list[PathSource]
+    recommended: bool
+
+
+class SelectOptionRequest(BaseModel):
+    option_id: str
+
+
+async def _tavily_search(query: str, max_results: int = 5) -> list[dict[str, Any]]:
+    """Run a single Tavily search. Returns [] on any failure (never raises)."""
+    if not TAVILY_API_KEY:
+        return []
+    try:
+        from tavily import AsyncTavilyClient
+        client = AsyncTavilyClient(api_key=TAVILY_API_KEY)
+        try:
+            res = await client.search(
+                query=query,
+                search_depth="basic",
+                max_results=max_results,
+                include_answer=False,
+            )
+        finally:
+            try:
+                await client.close()
+            except Exception:  # noqa: BLE001
+                pass
+        if isinstance(res, dict):
+            return res.get("results", []) or []
+        return []
+    except Exception as exc:  # noqa: BLE001
+        import sys
+        print(f"[tavily] search failed for {query!r}: {exc}", file=sys.stderr, flush=True)
+        return []
+
+
+async def _generate_and_save_path_options(
+    *, user_id: str, user_name: str, goal_id: str, goal_title: str
+) -> None:
+    """Background task: run 3 parallel Tavily searches, call Claude, save path_options doc."""
+    import sys
+    def log(msg: str) -> None:
+        print(f"[pathopts {goal_id}] {msg}", flush=True, file=sys.stderr)
+    log("starting")
+    try:
+        # Intake transcript
+        cursor = (
+            db.intake_messages.find({"goal_id": goal_id, "user_id": user_id}, {"_id": 0})
+            .sort("created_at", 1)
+        )
+        intake_msgs = [m async for m in cursor]
+        transcript = "\n".join(
+            f"{'User' if m['role'] == 'user' else 'Coach'}: {m['content']}"
+            for m in intake_msgs
+        )
+
+        # Behavioral profile (may be empty for new users)
+        try:
+            profile_block = await _build_behavioral_profile_block(user_id)
+        except Exception:  # noqa: BLE001
+            profile_block = ""
+
+        # Parallel Tavily searches
+        queries = [a["search_query_template"].format(goal=goal_title) for a in PATH_OPTIONS_ANGLES]
+        log(f"running {len(queries)} Tavily searches in parallel")
+        search_results = await asyncio.gather(
+            *[_tavily_search(q, max_results=5) for q in queries],
+            return_exceptions=True,
+        )
+        angle_results = []
+        for angle, results in zip(PATH_OPTIONS_ANGLES, search_results):
+            items = results if isinstance(results, list) else []
+            sources = [
+                {
+                    "title": (r.get("title") or "")[:200],
+                    "url": r.get("url") or "",
+                    "snippet": ((r.get("content") or "")[:280]).replace("\n", " ").strip(),
+                }
+                for r in items[:5]
+                if r.get("url")
+            ]
+            angle_results.append({**angle, "sources": sources})
+        log(f"tavily sources/angle: {[len(a['sources']) for a in angle_results]}")
+
+        # Build user payload for Claude
+        parts = [
+            f"GOAL: {goal_title}",
+            f"USER: {user_name}",
+            "",
+            "=== INTAKE TRANSCRIPT ===",
+            transcript or "(no intake messages)",
+            "=== END TRANSCRIPT ===",
+        ]
+        if profile_block.strip():
+            parts += ["", "=== BEHAVIORAL PROFILE ===", profile_block, "=== END PROFILE ==="]
+        parts += ["", "=== WEB SEARCH RESULTS (3 angles, same order as output) ==="]
+        for a in angle_results:
+            parts.append(f"\n--- Angle: {a['label']} (id: {a['angle_id']}) ---")
+            parts.append(f"Framing: {a['option_prompt']}")
+            if not a["sources"]:
+                parts.append("(no results available — set sources to [] for this option)")
+            for s in a["sources"]:
+                parts.append(f"* {s['title']}")
+                parts.append(f"  url: {s['url']}")
+                parts.append(f"  snippet: {s['snippet']}")
+        parts += ["=== END WEB SEARCH RESULTS ===", ""]
+        parts.append(
+            "Return the JSON object with 3 options (evidence_based, fastest, sustainable in that order), "
+            "coach_recommendation, and recommended_option_id."
+        )
+        user_payload = "\n".join(parts)
+
+        MODEL_ATTEMPTS = [
+            ("anthropic", "claude-sonnet-4-6"),
+            ("openai", "gpt-4o"),
+            ("openai", "gpt-4o-mini"),
+        ]
+        last_exc: Exception | None = None
+        parsed: dict[str, Any] | None = None
+        for attempt, (provider, model) in enumerate(MODEL_ATTEMPTS, start=1):
+            try:
+                log(f"attempt {attempt}: {provider}/{model}")
+                chat = LlmChat(
+                    api_key=EMERGENT_LLM_KEY,
+                    session_id=f"pathopts:{goal_id}:{uuid.uuid4().hex[:6]}",
+                    system_message=PATH_OPTIONS_SYSTEM_PROMPT,
+                ).with_model(provider, model)
+                raw = await chat.send_message(UserMessage(text=user_payload))
+                parsed = _parse_path_json(raw)
+                opts = parsed.get("options", [])
+                if not isinstance(opts, list) or len(opts) < 3:
+                    raise ValueError(f"expected 3 options, got {len(opts) if isinstance(opts, list) else 'n/a'}")
+                break
+            except Exception as exc:  # noqa: BLE001
+                last_exc = exc
+                log(f"attempt {attempt} failed: {exc}")
+                if attempt < len(MODEL_ATTEMPTS):
+                    await asyncio.sleep(2)
+        if parsed is None:
+            raise last_exc or RuntimeError("Path options generation returned no JSON")
+
+        recommended_id = parsed.get("recommended_option_id") or "option-1"
+        options_out = []
+        for opt in parsed["options"][:3]:
+            oid = opt.get("option_id") or f"option-{len(options_out) + 1}"
+            options_out.append({
+                "option_id": oid,
+                "angle": opt.get("angle", ""),
+                "name": opt.get("name", "Your Path"),
+                "tagline": opt.get("tagline", ""),
+                "timeline": opt.get("timeline", "12 weeks"),
+                "intensity": opt.get("intensity", "moderate"),
+                "why_this_fits": opt.get("why_this_fits", ""),
+                "key_milestones": opt.get("key_milestones", []) or [],
+                "sources": opt.get("sources", []) or [],
+                "recommended": oid == recommended_id,
+            })
+        # Safety: ensure at least one recommended
+        if not any(o["recommended"] for o in options_out) and options_out:
+            options_out[0]["recommended"] = True
+
+        now = _now()
+        doc = {
+            "goal_id": goal_id,
+            "user_id": user_id,
+            "goal_title": goal_title,
+            "coach_recommendation": parsed.get("coach_recommendation", ""),
+            "options": options_out,
+            "tavily_cache": angle_results,  # kept server-side for 24h undo reuse
+            "generated_at": now,
+            "cache_expires_at": now + timedelta(days=PATH_OPTIONS_CACHE_DAYS),
+        }
+        await db.path_options.replace_one({"goal_id": goal_id}, doc, upsert=True)
+        await db.goals.update_one(
+            {"goal_id": goal_id},
+            {"$set": {"intake_status": "options_ready"}},
+        )
+        log(f"saved options, recommended={recommended_id}")
+    except Exception as exc:  # noqa: BLE001
+        log(f"FAILED: {exc}")
+        await db.goals.update_one(
+            {"goal_id": goal_id},
+            {"$set": {"intake_status": "failed", "intake_error": str(exc)[:500]}},
+        )
+
+
+async def _expand_option_to_path(
+    *,
+    user_id: str,
+    user_name: str,
+    goal_id: str,
+    goal_title: str,
+    option: dict[str, Any],
+    coach_recommendation: str,
+) -> None:
+    """Expand a selected PathOption into the full PATH_BUILDER phases/milestones."""
+    import sys
+    def log(msg: str) -> None:
+        print(f"[pathexpand {goal_id} {option.get('option_id')}] {msg}", flush=True, file=sys.stderr)
+    log("starting")
+    try:
+        cursor = (
+            db.intake_messages.find({"goal_id": goal_id, "user_id": user_id}, {"_id": 0})
+            .sort("created_at", 1)
+        )
+        intake_msgs = [m async for m in cursor]
+        transcript = "\n".join(
+            f"{'User' if m['role'] == 'user' else 'Coach'}: {m['content']}"
+            for m in intake_msgs
+        )
+
+        milestones_block = "\n".join(f"  * {m}" for m in option.get("key_milestones", []) or [])
+        option_block = (
+            "SELECTED APPROACH (must follow — this is what the user chose):\n"
+            f"- Name: {option.get('name')}\n"
+            f"- Angle: {option.get('angle')}\n"
+            f"- Tagline: {option.get('tagline')}\n"
+            f"- Timeline: {option.get('timeline')}\n"
+            f"- Intensity: {option.get('intensity')}\n"
+            f"- Why this fits them: {option.get('why_this_fits')}\n"
+            f"- Outcome milestones the user committed to:\n{milestones_block}"
+        )
+
+        system_prompt = PATH_BUILDER_SYSTEM_PROMPT.format(
+            user_name=user_name, goal_title=goal_title
+        )
+        user_payload = (
+            "Build the full path for this user. They have ALREADY SELECTED the approach below — "
+            "your phases, weekly hours, and task intensity must match the selected approach.\n\n"
+            f"Goal: {goal_title}\n"
+            f"User: {user_name}\n\n"
+            f"{option_block}\n\n"
+            "=== INTAKE TRANSCRIPT ===\n"
+            f"{transcript}\n"
+            "=== END TRANSCRIPT ==="
+        )
+
+        MODEL_ATTEMPTS = [
+            ("anthropic", "claude-sonnet-4-6"),
+            ("openai", "gpt-4o"),
+            ("openai", "gpt-4o-mini"),
+            ("gemini", "gemini-2.0-flash"),
+        ]
+        last_exc: Exception | None = None
+        path_json: dict[str, Any] | None = None
+        for attempt, (provider, model) in enumerate(MODEL_ATTEMPTS, start=1):
+            try:
+                log(f"attempt {attempt}: {provider}/{model}")
+                chat = LlmChat(
+                    api_key=EMERGENT_LLM_KEY,
+                    session_id=f"pathexpand:{goal_id}:{uuid.uuid4().hex[:6]}",
+                    system_message=system_prompt,
+                ).with_model(provider, model)
+                raw = await chat.send_message(UserMessage(text=user_payload))
+                path_json = _parse_path_json(raw)
+                break
+            except Exception as exc:  # noqa: BLE001
+                last_exc = exc
+                log(f"attempt {attempt} failed: {exc}")
+                if attempt < len(MODEL_ATTEMPTS):
+                    await asyncio.sleep(2)
+        if path_json is None:
+            raise last_exc or RuntimeError("Path builder returned no JSON")
+
+        # If user is changing their pick within the 24h window, blow away the old path.
+        await db.paths.delete_many({"goal_id": goal_id})
+
+        path_id = f"path_{uuid.uuid4().hex[:12]}"
+        created_at = _now()
+        change_deadline = created_at + timedelta(hours=PATH_CHANGE_WINDOW_HOURS)
+        path_doc = {
+            "path_id": path_id,
+            "user_id": user_id,
+            "goal_id": goal_id,
+            "goal_title": goal_title,
+            "why_this_path": path_json.get("why_this_path", option.get("why_this_fits", "")),
+            "estimated_duration_weeks": int(path_json.get("estimated_duration_weeks", 12)),
+            "weekly_time_commitment_hours": int(path_json.get("weekly_time_commitment_hours", 5)),
+            "streak_count": int(path_json.get("streak_count", 0)),
+            "intake_summary": path_json.get("intake_summary", {}),
+            "phases": path_json.get("phases", []),
+            "status": "active",
+            "created_at": created_at,
+            # Session B additions — surfaces on /path page
+            "selected_option_id": option["option_id"],
+            "selected_option_name": option["name"],
+            "selected_option_angle": option["angle"],
+            "selected_option_tagline": option.get("tagline", ""),
+            "sources": option.get("sources", []),
+            "coach_recommendation": coach_recommendation,
+            "path_change_deadline": change_deadline,
+        }
+        await db.paths.insert_one(path_doc)
+        await db.goals.update_one(
+            {"goal_id": goal_id},
+            {
+                "$set": {
+                    "intake_status": "complete",
+                    "path_id": path_id,
+                    "path_completed_at": created_at,
+                    "selected_option_id": option["option_id"],
+                }
+            },
+        )
+        await _log_activity(
+            user_id,
+            "path.generated",
+            f"Generated path ({option.get('name')}) for: {goal_title}",
+            {"goal_id": goal_id, "path_id": path_id, "option_id": option["option_id"]},
+        )
+        log(f"saved path {path_id}")
+    except Exception as exc:  # noqa: BLE001
+        log(f"FAILED: {exc}")
+        await db.goals.update_one(
+            {"goal_id": goal_id},
+            {"$set": {"intake_status": "failed", "intake_error": str(exc)[:500]}},
+        )
+
+
+@app.post("/api/paths/build-options/{goal_id}")
+async def build_path_options(goal_id: str, user: User = Depends(get_current_user)):
+    """Kick off (or reuse cached) Tavily-backed path option generation.
+
+    Returns immediately; clients poll GET /api/paths/options/{goal_id}.
+    """
+    goal = await db.goals.find_one({"goal_id": goal_id, "user_id": user.user_id}, {"_id": 0})
+    if not goal:
+        raise HTTPException(status_code=404, detail="Goal not found")
+
+    existing = await db.path_options.find_one({"goal_id": goal_id}, {"_id": 0})
+    if existing:
+        expires = existing.get("cache_expires_at")
+        if isinstance(expires, datetime) and expires > _now():
+            await db.goals.update_one(
+                {"goal_id": goal_id}, {"$set": {"intake_status": "options_ready"}}
+            )
+            return {"ok": True, "status": "options_ready", "cached": True}
+
+    await db.goals.update_one(
+        {"goal_id": goal_id},
+        {"$set": {"intake_status": "building_options"}, "$unset": {"intake_error": ""}},
+    )
+    asyncio.create_task(
+        _generate_and_save_path_options(
+            user_id=user.user_id,
+            user_name=user.name,
+            goal_id=goal_id,
+            goal_title=goal["title"],
+        )
+    )
+    return {"ok": True, "status": "building_options"}
+
+
+@app.get("/api/paths/options/{goal_id}")
+async def get_path_options(goal_id: str, user: User = Depends(get_current_user)):
+    goal = await db.goals.find_one({"goal_id": goal_id, "user_id": user.user_id}, {"_id": 0})
+    if not goal:
+        raise HTTPException(status_code=404, detail="Goal not found")
+    doc = await db.path_options.find_one(
+        {"goal_id": goal_id}, {"_id": 0, "tavily_cache": 0}
+    )
+    if not doc:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "reason": "not_ready",
+                "intake_status": goal.get("intake_status", "not_started"),
+            },
+        )
+    return {
+        **doc,
+        "intake_status": goal.get("intake_status", "options_ready"),
+        "selected_option_id": goal.get("selected_option_id"),
+    }
+
+
+@app.post("/api/paths/select-option/{goal_id}")
+async def select_path_option(
+    goal_id: str,
+    body: SelectOptionRequest,
+    user: User = Depends(get_current_user),
+):
+    goal = await db.goals.find_one({"goal_id": goal_id, "user_id": user.user_id}, {"_id": 0})
+    if not goal:
+        raise HTTPException(status_code=404, detail="Goal not found")
+    doc = await db.path_options.find_one({"goal_id": goal_id}, {"_id": 0})
+    if not doc:
+        raise HTTPException(status_code=404, detail="No options available for this goal")
+    selected = next(
+        (o for o in doc.get("options", []) if o.get("option_id") == body.option_id), None
+    )
+    if not selected:
+        raise HTTPException(status_code=400, detail=f"Invalid option_id {body.option_id}")
+
+    await db.goals.update_one(
+        {"goal_id": goal_id},
+        {
+            "$set": {
+                "intake_status": "building_path",
+                "selected_option_id": body.option_id,
+            }
+        },
+    )
+    asyncio.create_task(
+        _expand_option_to_path(
+            user_id=user.user_id,
+            user_name=user.name,
+            goal_id=goal_id,
+            goal_title=goal["title"],
+            option=selected,
+            coach_recommendation=doc.get("coach_recommendation", ""),
+        )
+    )
+    return {"ok": True, "status": "building_path", "option_id": body.option_id}
 
 
 # =====================================================================
