@@ -16,17 +16,26 @@ import { useTheme } from "@/contexts/theme-context";
  */
 export function CoachWidget() {
   const { status } = useAuth();
-  const { isOpen, open, close, messages, sending, sendMessage } = useCoach();
+  const {
+    isOpen,
+    open,
+    close,
+    messages,
+    sending,
+    streaming,
+    unread,
+    sendMessage,
+  } = useCoach();
   const { theme } = useTheme();
   const isDark = theme === "dark";
   const [draft, setDraft] = useState("");
   const scrollRef = useRef<HTMLDivElement>(null);
 
-  // Always pin the chat to the latest message.
+  // Always pin the chat to the latest message (including while streaming).
   useEffect(() => {
     if (!scrollRef.current) return;
     scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-  }, [messages, isOpen, sending]);
+  }, [messages, isOpen, sending, streaming?.content]);
 
   if (status !== "authenticated") return null;
 
@@ -36,6 +45,10 @@ export function CoachWidget() {
     setDraft("");
     await sendMessage(text);
   };
+
+  // "Typing" = we're sending but haven't gotten the first delta yet.
+  const showTyping = sending && !streaming;
+  const hasUnread = unread.count > 0;
 
   return (
     <>
@@ -62,6 +75,32 @@ export function CoachWidget() {
           >
             <Sparkles className="w-6 h-6 sm:w-7 sm:h-7 text-[#080B14]" />
             <span className="absolute inset-0 rounded-full animate-ping bg-[#F5C518]/30" />
+            {hasUnread && (
+              <>
+                {/* Expanding gold pulse rings — "your coach reached out". */}
+                <motion.span
+                  aria-hidden
+                  className="absolute inset-0 rounded-full pointer-events-none border-[3px] border-[#F5C518]"
+                  initial={{ scale: 1, opacity: 0 }}
+                  animate={{ scale: [1, 1.9], opacity: [0.9, 0] }}
+                  transition={{ duration: 1.8, repeat: Infinity, ease: "easeOut" }}
+                />
+                <motion.span
+                  aria-hidden
+                  className="absolute inset-0 rounded-full pointer-events-none border-[2px] border-[#F5C518]/80"
+                  initial={{ scale: 1, opacity: 0 }}
+                  animate={{ scale: [1, 2.4], opacity: [0.7, 0] }}
+                  transition={{ duration: 1.8, repeat: Infinity, ease: "easeOut", delay: 0.6 }}
+                />
+                {/* Count badge */}
+                <span
+                  data-testid="coach-orb-unread-badge"
+                  className="absolute -top-1 -right-1 min-w-[22px] h-[22px] rounded-full bg-[#EF4444] text-white text-[11px] font-mono font-semibold flex items-center justify-center px-1.5 shadow-[0_2px_6px_rgba(0,0,0,0.4)]"
+                >
+                  {unread.count > 9 ? "9+" : unread.count}
+                </span>
+              </>
+            )}
           </motion.button>
         )}
       </AnimatePresence>
@@ -216,20 +255,56 @@ export function CoachWidget() {
                 ))}
 
                 {sending && (
-                  <div className="flex justify-start">
-                    <div
-                      className={`rounded-2xl px-4 py-2.5 text-sm ${
-                        isDark
-                          ? "bg-[rgba(255,255,255,0.05)] text-[rgba(255,255,255,0.5)]"
-                          : "bg-[rgba(0,0,0,0.04)] text-[rgba(0,0,0,0.5)]"
-                      }`}
-                    >
-                      <span className="inline-flex gap-1">
-                        <span className="w-1.5 h-1.5 rounded-full bg-current animate-bounce" style={{ animationDelay: "0ms" }} />
-                        <span className="w-1.5 h-1.5 rounded-full bg-current animate-bounce" style={{ animationDelay: "120ms" }} />
-                        <span className="w-1.5 h-1.5 rounded-full bg-current animate-bounce" style={{ animationDelay: "240ms" }} />
-                      </span>
-                    </div>
+                  <div
+                    className="flex justify-start"
+                    data-testid="coach-stream-slot"
+                  >
+                    <AnimatePresence mode="wait">
+                      {streaming ? (
+                        <motion.div
+                          key="streaming-bubble"
+                          initial={{ opacity: 0, y: 4 }}
+                          animate={{ opacity: 1, y: 0 }}
+                          exit={{ opacity: 0 }}
+                          transition={{ duration: 0.22, ease: [0.25, 0.4, 0.25, 1] }}
+                          data-testid="coach-streaming-bubble"
+                          className={`max-w-[85%] rounded-2xl px-4 py-2.5 font-sans text-sm leading-relaxed whitespace-pre-wrap ${
+                            isDark
+                              ? "bg-[rgba(255,255,255,0.05)] text-[rgba(255,255,255,0.9)] border border-[rgba(255,255,255,0.06)]"
+                              : "bg-[rgba(0,0,0,0.04)] text-[#1A1D21] border border-[rgba(0,0,0,0.06)]"
+                          }`}
+                        >
+                          {streaming.content}
+                          {/* Blinking caret — signals live generation. */}
+                          <motion.span
+                            aria-hidden
+                            className="inline-block w-[6px] h-[1em] align-[-2px] ml-[2px] bg-[#00D4FF] rounded-[1px]"
+                            animate={{ opacity: [1, 0.2, 1] }}
+                            transition={{ duration: 0.8, repeat: Infinity }}
+                          />
+                        </motion.div>
+                      ) : (
+                        <motion.div
+                          key="typing-bubble"
+                          initial={{ opacity: 0 }}
+                          animate={{ opacity: 1 }}
+                          exit={{ opacity: 0 }}
+                          transition={{ duration: 0.2 }}
+                          data-testid="coach-typing"
+                          className={`rounded-2xl px-4 py-2.5 text-sm ${
+                            isDark
+                              ? "bg-[rgba(255,255,255,0.05)] text-[rgba(255,255,255,0.5)]"
+                              : "bg-[rgba(0,0,0,0.04)] text-[rgba(0,0,0,0.5)]"
+                          }`}
+                        >
+                          <span className="inline-flex gap-1">
+                            <span className="w-1.5 h-1.5 rounded-full bg-current animate-bounce" style={{ animationDelay: "0ms" }} />
+                            <span className="w-1.5 h-1.5 rounded-full bg-current animate-bounce" style={{ animationDelay: "120ms" }} />
+                            <span className="w-1.5 h-1.5 rounded-full bg-current animate-bounce" style={{ animationDelay: "240ms" }} />
+                          </span>
+                        </motion.div>
+                      )}
+                    </AnimatePresence>
                   </div>
                 )}
               </div>

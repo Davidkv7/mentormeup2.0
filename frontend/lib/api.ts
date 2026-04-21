@@ -78,6 +78,69 @@ export const api = {
   delete: <T>(path: string, body?: unknown) => request<T>("DELETE", path, body),
 };
 
+/**
+ * Open an SSE-over-POST stream. The backend emits newline-delimited
+ * `event: <name>\ndata: <json>\n\n` blocks. This helper yields typed
+ * {event, data} objects until the stream closes.
+ *
+ * We can't use EventSource (it's GET-only and doesn't let us set Authorization),
+ * so we drive the stream ourselves via fetch + ReadableStream.
+ */
+export async function* openSSE<Ev extends string = string>(
+  path: string,
+  body: unknown,
+  signal?: AbortSignal,
+): AsyncGenerator<{ event: Ev; data: unknown }, void, unknown> {
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    Accept: "text/event-stream",
+  };
+  const token = getAuthToken();
+  if (token) headers["Authorization"] = `Bearer ${token}`;
+
+  const res = await fetch(`${BASE}${path}`, {
+    method: "POST",
+    credentials: "include",
+    headers,
+    body: JSON.stringify(body),
+    cache: "no-store",
+    signal,
+  });
+  if (!res.ok || !res.body) {
+    const text = await res.text().catch(() => "");
+    throw new ApiError(res.status, text || res.statusText, text);
+  }
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = "";
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    let sep = buf.indexOf("\n\n");
+    while (sep !== -1) {
+      const block = buf.slice(0, sep);
+      buf = buf.slice(sep + 2);
+      sep = buf.indexOf("\n\n");
+      if (!block.trim() || block.startsWith(":")) continue; // comment / heartbeat
+      let event = "message";
+      let dataRaw = "";
+      for (const line of block.split("\n")) {
+        if (line.startsWith("event:")) event = line.slice(6).trim();
+        else if (line.startsWith("data:")) dataRaw += line.slice(5).trim();
+      }
+      let data: unknown = null;
+      try {
+        data = dataRaw ? JSON.parse(dataRaw) : null;
+      } catch {
+        data = dataRaw;
+      }
+      yield { event: event as Ev, data };
+    }
+  }
+}
+
 // ---------- Types shared with backend ----------
 export interface AuthUser {
   user_id: string;

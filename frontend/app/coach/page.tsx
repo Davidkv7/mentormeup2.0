@@ -1,7 +1,7 @@
 "use client";
 
 import { useRef, useEffect, useState } from "react";
-import { motion } from "motion/react";
+import { motion, AnimatePresence } from "motion/react";
 import { ArrowUp, Calendar, Target, Sparkles } from "lucide-react";
 import Link from "next/link";
 import { SidebarNav } from "@/components/sidebar-nav";
@@ -30,7 +30,7 @@ function formatTimestamp(iso: string): string {
 }
 
 export default function CoachChatPage() {
-  const { messages, sending, sendMessage } = useCoach();
+  const { messages, sending, streaming, sendMessage, unread, markSeen } = useCoach();
   const { activeGoal } = useGoals();
   const [inputValue, setInputValue] = useState("");
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -40,9 +40,15 @@ export default function CoachChatPage() {
   // Hide chips after the first user message.
   const showChips = messages.filter((m) => m.role === "user").length === 0;
 
+  // Opening the dedicated /coach page counts as "seeing" the coach.
+  useEffect(() => {
+    if (unread.count > 0) void markSeen();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages, sending]);
+  }, [messages, sending, streaming?.content]);
 
   const handleSend = async (content: string) => {
     const trimmed = content.trim();
@@ -238,36 +244,72 @@ export default function CoachChatPage() {
                 );
               })}
 
-              {/* Typing indicator while Claude is thinking */}
+              {/* Typing indicator while Claude is thinking — cross-fades into
+                   the streaming bubble as soon as the first delta arrives. */}
               {sending && (
-                <motion.div
-                  initial={{ opacity: 0, x: -20 }}
-                  animate={{ opacity: 1, x: 0 }}
-                  transition={{ duration: 0.3 }}
+                <div
+                  data-testid="coach-page-stream-slot"
                   className="flex gap-3 lg:gap-4 justify-start"
-                  data-testid="coach-page-typing"
                 >
                   <div className="flex-shrink-0 mt-1 hidden sm:block">
                     <AnimatedOrb size={36} />
                   </div>
-                  <div
-                    className="rounded-2xl rounded-bl-md px-4 py-3"
-                    style={{
-                      background: isDark
-                        ? 'linear-gradient(135deg, rgba(255, 255, 255, 0.05) 0%, rgba(255, 255, 255, 0.02) 100%)'
-                        : 'linear-gradient(135deg, rgba(255, 255, 255, 0.9) 0%, rgba(255, 255, 255, 0.7) 100%)',
-                      backdropFilter: 'blur(24px)',
-                      border: isDark ? '1px solid rgba(255, 255, 255, 0.06)' : '1px solid rgba(0, 0, 0, 0.08)',
-                      borderLeft: '2px solid #00D4FF',
-                    }}
-                  >
-                    <div className="flex items-center gap-1.5">
-                      <span className="w-1.5 h-1.5 rounded-full bg-[#00D4FF] animate-bounce" style={{ animationDelay: "0ms" }} />
-                      <span className="w-1.5 h-1.5 rounded-full bg-[#00D4FF] animate-bounce" style={{ animationDelay: "150ms" }} />
-                      <span className="w-1.5 h-1.5 rounded-full bg-[#00D4FF] animate-bounce" style={{ animationDelay: "300ms" }} />
-                    </div>
-                  </div>
-                </motion.div>
+                  <AnimatePresence mode="wait">
+                    {streaming ? (
+                      <motion.div
+                        key="page-streaming-bubble"
+                        initial={{ opacity: 0, y: 4 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        exit={{ opacity: 0 }}
+                        transition={{ duration: 0.22, ease: [0.25, 0.4, 0.25, 1] }}
+                        className="max-w-[85%] sm:max-w-[80%] lg:max-w-[75%] rounded-2xl rounded-bl-md p-4 lg:p-5"
+                        data-testid="coach-page-streaming-bubble"
+                        style={{
+                          background: isDark
+                            ? 'linear-gradient(135deg, rgba(255, 255, 255, 0.05) 0%, rgba(255, 255, 255, 0.02) 100%)'
+                            : 'linear-gradient(135deg, rgba(255, 255, 255, 0.9) 0%, rgba(255, 255, 255, 0.7) 100%)',
+                          backdropFilter: 'blur(24px)',
+                          border: isDark ? '1px solid rgba(255, 255, 255, 0.06)' : '1px solid rgba(0, 0, 0, 0.08)',
+                          borderLeft: '2px solid #00D4FF',
+                        }}
+                      >
+                        <p className="text-sm lg:text-base text-foreground leading-relaxed whitespace-pre-wrap">
+                          {streaming.content}
+                          <motion.span
+                            aria-hidden
+                            className="inline-block w-[7px] h-[1em] align-[-2px] ml-[2px] bg-[#00D4FF] rounded-[1px]"
+                            animate={{ opacity: [1, 0.2, 1] }}
+                            transition={{ duration: 0.8, repeat: Infinity }}
+                          />
+                        </p>
+                      </motion.div>
+                    ) : (
+                      <motion.div
+                        key="page-typing"
+                        initial={{ opacity: 0 }}
+                        animate={{ opacity: 1 }}
+                        exit={{ opacity: 0 }}
+                        transition={{ duration: 0.2 }}
+                        className="rounded-2xl rounded-bl-md px-4 py-3"
+                        data-testid="coach-page-typing"
+                        style={{
+                          background: isDark
+                            ? 'linear-gradient(135deg, rgba(255, 255, 255, 0.05) 0%, rgba(255, 255, 255, 0.02) 100%)'
+                            : 'linear-gradient(135deg, rgba(255, 255, 255, 0.9) 0%, rgba(255, 255, 255, 0.7) 100%)',
+                          backdropFilter: 'blur(24px)',
+                          border: isDark ? '1px solid rgba(255, 255, 255, 0.06)' : '1px solid rgba(0, 0, 0, 0.08)',
+                          borderLeft: '2px solid #00D4FF',
+                        }}
+                      >
+                        <div className="flex items-center gap-1.5">
+                          <span className="w-1.5 h-1.5 rounded-full bg-[#00D4FF] animate-bounce" style={{ animationDelay: "0ms" }} />
+                          <span className="w-1.5 h-1.5 rounded-full bg-[#00D4FF] animate-bounce" style={{ animationDelay: "150ms" }} />
+                          <span className="w-1.5 h-1.5 rounded-full bg-[#00D4FF] animate-bounce" style={{ animationDelay: "300ms" }} />
+                        </div>
+                      </motion.div>
+                    )}
+                  </AnimatePresence>
+                </div>
               )}
 
               <div ref={messagesEndRef} />

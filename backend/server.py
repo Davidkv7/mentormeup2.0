@@ -9,13 +9,15 @@ import os
 import re
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Any, Literal
+from typing import Any, AsyncGenerator, Literal
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import httpx
 from dotenv import load_dotenv
 from emergentintegrations.llm.chat import LlmChat, UserMessage
 from fastapi import Cookie, Depends, FastAPI, Header, HTTPException, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel, Field
 
@@ -844,37 +846,68 @@ async def coach_chat(body: ChatRequest, user: User = Depends(get_current_user)):
     if not body.message.strip():
         raise HTTPException(status_code=400, detail="Empty message")
 
-    # Persist user message first so it's visible in history even if LLM fails.
+    prep = await _prepare_coach_turn(user, body.message)
+
+    chat = LlmChat(
+        api_key=EMERGENT_LLM_KEY,
+        session_id=f"coach:{user.user_id}:{uuid.uuid4().hex[:6]}",
+        system_message=prep["system_prompt"],
+        initial_messages=prep["initial_messages"] or None,
+    ).with_model(COACH_MODEL_PROVIDER, COACH_MODEL_NAME)
+
+    try:
+        raw_reply = await chat.send_message(UserMessage(text=body.message))
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=f"Coach LLM error: {exc}") from exc
+
+    # Execute any inline <action> tool calls Claude emitted and strip them from
+    # the reply before persisting/returning the user-facing text.
+    reply_text, actions = await _execute_tool_calls(raw_reply, user)
+
+    assistant_msg_id = f"msg_{uuid.uuid4().hex[:12]}"
+    created_at = _now()
+    await db.chat_messages.insert_one(
+        {
+            "message_id": assistant_msg_id,
+            "user_id": user.user_id,
+            "role": "assistant",
+            "content": reply_text,
+            "actions": actions,
+            "created_at": created_at,
+        }
+    )
+    return ChatResponse(
+        message_id=assistant_msg_id, reply=reply_text,
+        created_at=created_at, actions=actions,
+    )
+
+
+# ---------------------------------------------------------------------- streaming
+async def _prepare_coach_turn(user: User, message: str) -> dict[str, Any]:
+    """Shared setup for both /api/coach/chat and /api/coach/chat/stream.
+    Persists the user turn and returns the system prompt + initial messages
+    (few-shot primers + prior history) along with the user message id."""
     user_msg_id = f"msg_{uuid.uuid4().hex[:12]}"
+    user_created_at = _now()
     await db.chat_messages.insert_one(
         {
             "message_id": user_msg_id,
             "user_id": user.user_id,
             "role": "user",
-            "content": body.message,
-            "created_at": _now(),
+            "content": message,
+            "created_at": user_created_at,
         }
     )
-
-    # Rebuild short-term context for Claude: last 20 messages, oldest first.
-    history_cursor = (
-        db.chat_messages.find({"user_id": user.user_id}, {"_id": 0})
-        .sort("created_at", -1)
-        .limit(20)
-    )
-    history = list(reversed([m async for m in history_cursor]))
 
     context = await _build_coach_context(user)
     today = _now().date()
     tomorrow = today + timedelta(days=1)
-    # Pick the user's first active goal for example_goal_id, else a placeholder.
     first_goal = await db.goals.find_one(
         {"user_id": user.user_id, "status": {"$in": ["active", "paused"]}},
         {"_id": 0, "goal_id": 1},
     )
     example_goal_id = first_goal["goal_id"] if first_goal else "goal_xxx"
 
-    # Pull the user's saved coaching preferences so the coach adapts tone + timing.
     prefs = await _load_preferences(user)
     coaching_style_note = COACHING_STYLE_DESCRIPTIONS.get(
         prefs.coaching_style, COACHING_STYLE_DESCRIPTIONS["balanced"]
@@ -882,7 +915,6 @@ async def coach_chat(body: ChatRequest, user: User = Depends(get_current_user)):
     preferred_work_time_note = PREFERRED_WORK_TIME_DESCRIPTIONS.get(
         prefs.preferred_work_time, PREFERRED_WORK_TIME_DESCRIPTIONS["flexible"]
     )
-
     system_prompt = COACH_SYSTEM_PROMPT.format(
         user_name=user.name,
         context=context,
@@ -893,7 +925,6 @@ async def coach_chat(body: ChatRequest, user: User = Depends(get_current_user)):
         preferred_work_time_note=preferred_work_time_note,
     )
 
-    # Load prior turns so Claude has the full thread.
     prior_cursor = (
         db.chat_messages.find(
             {"user_id": user.user_id, "message_id": {"$ne": user_msg_id}},
@@ -904,11 +935,6 @@ async def coach_chat(body: ChatRequest, user: User = Depends(get_current_user)):
     )
     prior_msgs = list(reversed([m async for m in prior_cursor]))
 
-    # Few-shot priming: prepend synthetic assistant examples BEFORE real history.
-    # When Claude sees its "own previous messages" emit the <action> tag format,
-    # it pattern-matches and reliably emits them on the new turn. System-prompt
-    # instructions alone aren't enough — Claude treats them as roleplay and
-    # fakes the action in prose. Assistant-authored demos break that pattern.
     fewshot_task_id = "t-FEWSHOT-1"
     fewshot_goal_id = example_goal_id
     fewshot = [
@@ -951,42 +977,161 @@ async def coach_chat(body: ChatRequest, user: User = Depends(get_current_user)):
         },
     ]
 
-    initial_messages = fewshot + [
-        {"role": m["role"], "content": m["content"]} for m in prior_msgs
+    initial_messages = [
+        {"role": "system", "content": system_prompt},
+        *fewshot,
+        *[{"role": m["role"], "content": m["content"]} for m in prior_msgs],
     ]
+    return {
+        "system_prompt": system_prompt,
+        "initial_messages": initial_messages,
+        "user_message_id": user_msg_id,
+        "user_created_at": user_created_at,
+    }
 
-    chat = LlmChat(
-        api_key=EMERGENT_LLM_KEY,
-        session_id=f"coach:{user.user_id}:{uuid.uuid4().hex[:6]}",
-        system_message=system_prompt,
-        initial_messages=initial_messages or None,
-    ).with_model(COACH_MODEL_PROVIDER, COACH_MODEL_NAME)
 
-    try:
-        raw_reply = await chat.send_message(UserMessage(text=body.message))
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=502, detail=f"Coach LLM error: {exc}") from exc
+# ---------------------------------------------------------------------- SSE
+@app.post("/api/coach/chat/stream")
+async def coach_chat_stream(body: ChatRequest, user: User = Depends(get_current_user)):
+    """Server-Sent Events version of /api/coach/chat.
 
-    # Execute any inline <action> tool calls Claude emitted and strip them from
-    # the reply before persisting/returning the user-facing text.
-    reply_text, actions = await _execute_tool_calls(raw_reply, user)
+    Emits:
+      event: user_message   data: {message_id, created_at, content}
+      event: delta          data: {text}            (one or more, action tags stripped)
+      event: done           data: {message_id, created_at, content, actions}
+      event: error          data: {detail}
 
-    assistant_msg_id = f"msg_{uuid.uuid4().hex[:12]}"
-    created_at = _now()
-    await db.chat_messages.insert_one(
-        {
+    Note: the Emergent LLM proxy returns deltas in a handful of medium chunks
+    rather than per-token, so clients should render each delta with a small
+    word-by-word animation on the frontend to avoid chunk-y appearance.
+    """
+    if not body.message.strip():
+        raise HTTPException(status_code=400, detail="Empty message")
+
+    async def event_stream() -> AsyncGenerator[str, None]:
+        try:
+            prep = await _prepare_coach_turn(user, body.message)
+        except Exception as exc:  # noqa: BLE001
+            yield _sse("error", {"detail": f"Setup failed: {exc}"})
+            return
+
+        yield _sse("user_message", {
+            "message_id": prep["user_message_id"],
+            "created_at": prep["user_created_at"].isoformat(),
+            "content": body.message,
+        })
+
+        # Heartbeat so proxies don't buffer / drop the connection.
+        yield ":\n\n"
+
+        raw_reply_parts: list[str] = []
+        # Streaming buffer used to swallow <action>...</action> blocks before
+        # they reach the client.
+        visible_buffer = ""
+        # When True we're inside an action tag and discarding text.
+        in_action = False
+
+        try:
+            import litellm  # type: ignore
+            from emergentintegrations.llm.chat import get_integration_proxy_url  # type: ignore
+
+            params: dict[str, Any] = {
+                "model": COACH_MODEL_NAME,
+                "messages": prep["initial_messages"]
+                + [{"role": "user", "content": body.message}],
+                "api_key": EMERGENT_LLM_KEY,
+                "stream": True,
+            }
+            if EMERGENT_LLM_KEY.startswith("sk-emergent-"):
+                params["api_base"] = get_integration_proxy_url() + "/llm"
+                params["custom_llm_provider"] = "openai"
+
+            stream = await litellm.acompletion(**params)
+            async for chunk in stream:
+                try:
+                    delta = chunk.choices[0].delta.content or ""
+                except Exception:  # noqa: BLE001
+                    delta = ""
+                if not delta:
+                    continue
+                raw_reply_parts.append(delta)
+                visible_buffer += delta
+
+                # Action-tag aware flushing: emit any chars up to the start of
+                # a possibly-starting '<action' sequence, then wait.
+                out = ""
+                i = 0
+                while i < len(visible_buffer):
+                    if not in_action:
+                        open_idx = visible_buffer.find("<action", i)
+                        if open_idx == -1:
+                            # Flush everything we have unless it ends with a
+                            # potential partial '<' prefix.
+                            tail_start = visible_buffer.rfind("<", i)
+                            safe_end = len(visible_buffer)
+                            if tail_start != -1 and safe_end - tail_start <= 7:
+                                safe_end = tail_start
+                            out += visible_buffer[i:safe_end]
+                            i = safe_end
+                            break
+                        # Flush up to open_idx.
+                        out += visible_buffer[i:open_idx]
+                        in_action = True
+                        i = open_idx
+                    else:
+                        close_idx = visible_buffer.find("</action>", i)
+                        if close_idx == -1:
+                            # No close yet, drop the rest of the buffer and
+                            # wait for more chunks.
+                            i = len(visible_buffer)
+                            break
+                        i = close_idx + len("</action>")
+                        in_action = False
+                # Keep unconsumed tail for next iteration.
+                visible_buffer = visible_buffer[i:]
+                if out:
+                    yield _sse("delta", {"text": out})
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            yield _sse("error", {"detail": f"LLM stream error: {exc}"})
+            return
+
+        raw_reply = "".join(raw_reply_parts)
+        reply_text, actions = await _execute_tool_calls(raw_reply, user)
+
+        assistant_msg_id = f"msg_{uuid.uuid4().hex[:12]}"
+        created_at = _now()
+        await db.chat_messages.insert_one(
+            {
+                "message_id": assistant_msg_id,
+                "user_id": user.user_id,
+                "role": "assistant",
+                "content": reply_text,
+                "actions": actions,
+                "created_at": created_at,
+            }
+        )
+        yield _sse("done", {
             "message_id": assistant_msg_id,
-            "user_id": user.user_id,
-            "role": "assistant",
+            "created_at": created_at.isoformat(),
             "content": reply_text,
             "actions": actions,
-            "created_at": created_at,
-        }
+        })
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "X-Accel-Buffering": "no",  # disable proxy buffering
+            "Connection": "keep-alive",
+        },
     )
-    return ChatResponse(
-        message_id=assistant_msg_id, reply=reply_text,
-        created_at=created_at, actions=actions,
-    )
+
+
+def _sse(event: str, data: dict[str, Any]) -> str:
+    return f"event: {event}\ndata: {json.dumps(data, default=str)}\n\n"
 
 
 @app.get("/api/coach/history")
@@ -997,6 +1142,57 @@ async def coach_history(user: User = Depends(get_current_user), limit: int = 100
         .limit(limit)
     )
     return [doc async for doc in cursor]
+
+
+PROACTIVE_KINDS = ("struggle_nudge", "evening_checkin")
+
+
+@app.get("/api/coach/unread")
+async def coach_unread(user: User = Depends(get_current_user)):
+    """Returns how many proactive coach messages (evening nudges, struggle
+    detection) have arrived since the user last opened the coach surface.
+    Drives the gold pulse ring on the AnimatedOrb."""
+    state = await db.user_state.find_one({"user_id": user.user_id}, {"_id": 0}) or {}
+    last_seen = state.get("last_coach_seen_at")
+    query: dict[str, Any] = {
+        "user_id": user.user_id,
+        "role": "assistant",
+        "kind": {"$in": list(PROACTIVE_KINDS)},
+    }
+    if last_seen:
+        query["created_at"] = {"$gt": last_seen}
+    count = await db.chat_messages.count_documents(query)
+
+    latest = None
+    if count:
+        doc = await db.chat_messages.find_one(
+            query, {"_id": 0, "message_id": 1, "kind": 1, "created_at": 1, "content": 1},
+            sort=[("created_at", -1)],
+        )
+        if doc:
+            latest = {
+                "message_id": doc.get("message_id"),
+                "kind": doc.get("kind"),
+                "preview": (doc.get("content") or "")[:140],
+                "created_at": (
+                    doc["created_at"].isoformat() if isinstance(doc.get("created_at"), datetime)
+                    else doc.get("created_at")
+                ),
+            }
+    return {"count": count, "latest": latest}
+
+
+@app.post("/api/coach/mark-seen")
+async def coach_mark_seen(user: User = Depends(get_current_user)):
+    """Clear the unread pulse — called when the user opens the coach drawer or
+    navigates to /coach."""
+    now = _now()
+    await db.user_state.update_one(
+        {"user_id": user.user_id},
+        {"$set": {"last_coach_seen_at": now, "updated_at": now}},
+        upsert=True,
+    )
+    return {"ok": True, "seen_at": now.isoformat()}
 
 
 @app.get("/api/coach/_debug/system-prompt")
@@ -2109,11 +2305,37 @@ async def _generate_evening_nudge(user_doc: dict[str, Any], path_doc: dict[str, 
 
 
 async def _process_evening_checkin_for_user(user_doc: dict[str, Any]) -> bool:
-    """Run the evening check-in for one user. Returns True if a nudge was sent."""
+    """Run the evening check-in for one user. Returns True if a nudge was sent.
+
+    Timezone-aware: we fire only when the user's LOCAL clock is between 20:00
+    and 21:00. The user's tz lives in user_preferences.timezone (IANA name,
+    defaults to UTC). Idempotency is stamped by the user's LOCAL date, not
+    UTC — otherwise a single evening could fire twice for users near the date
+    boundary."""
     user_id = user_doc["user_id"]
-    today = _now().date().isoformat()
+
+    # Load the user's preferences (timezone, plus the proactive toggle).
+    prefs_doc = await db.user_preferences.find_one({"user_id": user_id}, {"_id": 0}) or {}
+    if prefs_doc.get("proactive_checkins") is False:
+        return False
+    tz_name = prefs_doc.get("timezone") or "UTC"
+    try:
+        tz = ZoneInfo(tz_name)
+    except ZoneInfoNotFoundError:
+        tz = timezone.utc
+
+    local_now = _now().astimezone(tz)
+    if not (CHECKIN_WINDOW_START_HOUR <= local_now.hour < CHECKIN_WINDOW_END_HOUR):
+        return False
+
+    local_today = local_now.date().isoformat()
     state = await db.user_state.find_one({"user_id": user_id}, {"_id": 0}) or {}
-    if state.get("last_evening_checkin_date") == today:
+    if state.get("last_evening_checkin_local_date") == local_today:
+        return False
+    # Back-compat: if the old UTC-date field matches today's local date
+    # (rare, only when tz = UTC), also skip so we don't double-fire during
+    # the one-time migration.
+    if state.get("last_evening_checkin_date") == local_today and tz_name in ("UTC", "Etc/UTC"):
         return False
 
     # Find the user's active goal + path.
@@ -2160,13 +2382,22 @@ async def _process_evening_checkin_for_user(user_doc: dict[str, Any]) -> bool:
     })
     await db.user_state.update_one(
         {"user_id": user_id},
-        {"$set": {"last_evening_checkin_date": today, "updated_at": _now()}},
+        {"$set": {
+            "last_evening_checkin_local_date": local_today,
+            "last_evening_checkin_timezone": tz_name,
+            "updated_at": _now(),
+        }},
         upsert=True,
     )
     await _log_activity(
         user_id, "coach.evening_checkin",
-        f"Evening nudge sent for '{today_task['title']}'",
-        {"task_id": today_task.get("task_id"), "message_id": msg_id},
+        f"Evening nudge sent for '{today_task['title']}' ({tz_name} {local_now:%H:%M})",
+        {
+            "task_id": today_task.get("task_id"),
+            "message_id": msg_id,
+            "local_time": local_now.isoformat(),
+            "timezone": tz_name,
+        },
     )
     return True
 
@@ -2406,11 +2637,14 @@ STRUGGLE_LOOP_INTERVAL_SECONDS = 900  # 15 minutes
 
 async def _evening_checkin_loop() -> None:
     import sys
+    # The per-user timezone check lives inside run_evening_checkins, so we
+    # fire the scan on every tick. Only users whose local time is in
+    # [20:00, 21:00) and haven't been nudged today (local-date-stamped) get
+    # a message.
     while True:
         try:
-            hour = _now().hour
-            if CHECKIN_WINDOW_START_HOUR <= hour < CHECKIN_WINDOW_END_HOUR:
-                result = await run_evening_checkins()
+            result = await run_evening_checkins()
+            if result.get("sent"):
                 print(f"[evening_checkin] {result}", file=sys.stderr, flush=True)
         except Exception as exc:  # noqa: BLE001
             print(f"[evening_checkin] error: {exc}", file=sys.stderr, flush=True)

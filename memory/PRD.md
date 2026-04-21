@@ -109,6 +109,47 @@ MongoDB: users, user_sessions, user_state, goals, paths, chat_messages,
 - Frontend: `api.delete` now accepts a body (needed for typed-DELETE
   confirmation payload).
 
+### Session 9 — SSE streaming + gold orb pulse + timezone-aware evening check-in
+- **SSE streaming coach**: new `POST /api/coach/chat/stream` endpoint backed
+  by litellm `acompletion(stream=True)` through the Emergent proxy. Emits
+  `user_message` / `delta` / `done` / `error` SSE events. `<action>...
+  </action>` blocks are swallowed inside a buffer-aware filter so they never
+  leak to the client. The non-streaming `/api/coach/chat` still works for
+  parity; both share a new `_prepare_coach_turn` helper.
+- **Frontend streaming consumption**: `openSSE(path, body)` in `lib/api.ts`
+  drives the stream over fetch+ReadableStream (EventSource can't POST or set
+  Authorization headers). `CoachContext` now exposes a `streaming` state
+  plus a **character-by-character painter** running on
+  `requestAnimationFrame` at ~250 chars/sec — Claude's proxy delivers deltas
+  in 2-3 big bursts, the painter smooths them out so the UI reads like real
+  word-by-word generation. Mobile-tested at 393x852px.
+- **Smooth typing→stream transition**: both the widget and `/coach` page
+  use `AnimatePresence mode="wait"` to cross-fade the typing indicator out
+  and the streaming bubble (with a pulsing blue caret) in. Verified
+  mid-stream on mobile with len=81 and len=204 captures.
+- **Gold orb "coach reached out" pulse**: new backend endpoints
+  `GET /api/coach/unread` (counts `struggle_nudge` + `evening_checkin`
+  messages since `user_state.last_coach_seen_at`) and
+  `POST /api/coach/mark-seen`. `CoachContext` polls every 60s and auto-
+  marks-seen when the drawer opens or `/coach` page loads. `AnimatedOrb`
+  gained an optional `pulse` prop; `CoachWidget` renders expanding gold
+  rings + a red unread count badge around the floating orb when
+  `unread.count > 0`.
+- **Timezone-aware evening check-in** (fix for "any real user outside UTC
+  is getting nudges at the wrong time or not at all"):
+  `_process_evening_checkin_for_user` now reads each user's
+  `preferences.timezone` (IANA name, default UTC), computes local time via
+  `zoneinfo.ZoneInfo`, and only fires when local hour ∈ [20, 21).
+  Idempotency stamped by `last_evening_checkin_local_date` (LOCAL date) +
+  `last_evening_checkin_timezone` so travelling users don't double-fire
+  near the date boundary. Honors `proactive_checkins: false`. Also honors
+  DST automatically via IANA tz. Background loop now runs every 5 min
+  unconditionally (per-user tz check is inside). Verified with four
+  scenarios: Kiritimati-in-window→fires, NY-out-of-window→skips, opt-out
+  →skips, tz-change-into-window→fires.
+- **api.delete** supports bodies (used in session 8 for the DELETE
+  account flow) — unchanged this session.
+
 ## What's Been Implemented
 
 ### Sessions 1–4 — Foundation
