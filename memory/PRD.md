@@ -150,6 +150,30 @@ MongoDB: users, user_sessions, user_state, goals, paths, chat_messages,
 - **api.delete** supports bodies (used in session 8 for the DELETE
   account flow) — unchanged this session.
 
+### Session 10 — GoalSwitcher prominence + "show me what the coach said" shortcut
+- **GoalSwitcher** now takes a `variant` prop with three modes:
+  - `full` (default) — existing 240px sidebar pill
+  - `compact` — 40x40 coloured dot for the 72px collapsed desktop sidebar
+    (was fully clipped before)
+  - `mobile-topbar` — dot + truncated goal title + chevron, always visible
+    in the mobile top bar next to the hamburger so multi-goal users can
+    switch without opening the menu
+- **Mobile top bar** gained the `mobile-topbar` GoalSwitcher between the
+  logo and the hamburger. Desktop collapsed sidebar uses `compact`;
+  expanded uses `full`.
+- **"Show me what the coach said" shortcut**: when the CoachDrawer opens
+  with `unread.count > 0`, we remember `unread.latest.message_id`, wait
+  for the drawer slide-in, then `scrollIntoView` that bubble and apply a
+  new `coach-new-flash` CSS animation (gold ring that pulses in and fades
+  out over 2.4s). Cleared automatically; will fire again for the next
+  proactive message. Verified on mobile 400x860 with all three captures
+  showing the gold halo on the correct bubble.
+- **Hook-ordering fix** in `CoachWidget`: the `useState`/`useRef`/
+  `useEffect` for the shortcut had been placed after the
+  `if (status !== "authenticated") return null` early return, which
+  triggered React minified error #310 ("change in the order of Hooks").
+  Moved them above the early return.
+
 ## What's Been Implemented
 
 ### Sessions 1–4 — Foundation

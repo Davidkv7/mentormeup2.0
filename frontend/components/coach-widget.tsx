@@ -37,6 +37,31 @@ export function CoachWidget() {
     scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
   }, [messages, isOpen, sending, streaming?.content]);
 
+  // "Show me what the coach said" shortcut — when the drawer opens with an
+  // unread proactive message, remember its id briefly so we can scroll to
+  // it and flash a gold highlight on its bubble.
+  const [highlightId, setHighlightId] = useState<string | null>(null);
+  const lastOpenedRef = useRef(false);
+  useEffect(() => {
+    if (isOpen && !lastOpenedRef.current) {
+      lastOpenedRef.current = true;
+      const msgId = unread.latest?.message_id;
+      if (msgId && unread.count > 0) {
+        setHighlightId(msgId);
+        setTimeout(() => {
+          const el = document.querySelector(
+            `[data-message-id="${msgId}"]`,
+          ) as HTMLElement | null;
+          if (el) el.scrollIntoView({ behavior: "smooth", block: "center" });
+        }, 450);
+        setTimeout(() => setHighlightId(null), 2600);
+      }
+    } else if (!isOpen) {
+      lastOpenedRef.current = false;
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOpen]);
+
   if (status !== "authenticated") return null;
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -203,21 +228,24 @@ export function CoachWidget() {
                   </div>
                 )}
 
-                {messages.map((m) => (
-                  <div
-                    key={m.message_id}
-                    className={`flex flex-col ${m.role === "user" ? "items-end" : "items-start"}`}
-                  >
+                {messages.map((m) => {
+                  const isHighlight = highlightId === m.message_id;
+                  return (
                     <div
-                      className={`max-w-[85%] rounded-2xl px-4 py-2.5 font-sans text-sm leading-relaxed whitespace-pre-wrap ${
-                        m.role === "user"
-                          ? "bg-[#F5C518] text-[#080B14]"
-                          : isDark
-                            ? "bg-[rgba(255,255,255,0.05)] text-[rgba(255,255,255,0.9)] border border-[rgba(255,255,255,0.06)]"
-                            : "bg-[rgba(0,0,0,0.04)] text-[#1A1D21] border border-[rgba(0,0,0,0.06)]"
-                      }`}
-                      data-testid={`coach-msg-${m.role}`}
+                      key={m.message_id}
+                      data-message-id={m.message_id}
+                      className={`flex flex-col ${m.role === "user" ? "items-end" : "items-start"}`}
                     >
+                      <div
+                        className={`max-w-[85%] rounded-2xl px-4 py-2.5 font-sans text-sm leading-relaxed whitespace-pre-wrap transition-[box-shadow,background-color] duration-500 ${
+                          m.role === "user"
+                            ? "bg-[#F5C518] text-[#080B14]"
+                            : isDark
+                              ? "bg-[rgba(255,255,255,0.05)] text-[rgba(255,255,255,0.9)] border border-[rgba(255,255,255,0.06)]"
+                              : "bg-[rgba(0,0,0,0.04)] text-[#1A1D21] border border-[rgba(0,0,0,0.06)]"
+                        } ${isHighlight ? "coach-new-flash" : ""}`}
+                        data-testid={`coach-msg-${m.role}${isHighlight ? "-highlighted" : ""}`}
+                      >
                       {m.content}
                     </div>
                     {m.role === "assistant" && m.actions && m.actions.length > 0 && (
@@ -252,7 +280,8 @@ export function CoachWidget() {
                       </div>
                     )}
                   </div>
-                ))}
+                  );
+                })}
 
                 {sending && (
                   <div

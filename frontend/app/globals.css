@@ -327,3 +327,17 @@
   transform: translateY(-2px);
   box-shadow: 0 8px 32px -4px rgba(0, 0, 0, 0.3);
 }
+
+/* "Your coach reached out" flash — used when the orb drawer auto-scrolls
+   to a proactive coach message (struggle nudge, evening check-in). */
+@keyframes coachNewFlashKf {
+  0%   { box-shadow: 0 0 0 1px rgba(245,197,24,0.0), 0 0 0 0 rgba(245,197,24,0.0); }
+  15%  { box-shadow: 0 0 0 2px rgba(245,197,24,0.85), 0 0 28px 8px rgba(245,197,24,0.55); }
+  60%  { box-shadow: 0 0 0 2px rgba(245,197,24,0.45), 0 0 18px 4px rgba(245,197,24,0.3); }
+  100% { box-shadow: 0 0 0 1px rgba(245,197,24,0.0), 0 0 0 0 rgba(245,197,24,0.0); }
+}
+
+.coach-new-flash {
+  animation: coachNewFlashKf 2.4s ease-out 1;
+  position: relative;
+}

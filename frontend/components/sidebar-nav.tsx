@@ -50,12 +50,17 @@ export function SidebarNav() {
             : 'bg-[rgba(248,249,250,0.95)] border-b border-[rgba(0,0,0,0.06)]'
         }`}
       >
-        <Link href="/" className="flex items-center gap-2">
+        <Link href="/" className="flex items-center gap-2" data-testid="mobile-logo">
           <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-[#F5C518] to-[#D4A912] flex items-center justify-center shadow-[0_2px_12px_rgba(245,197,24,0.3)]">
             <span className="font-sans font-bold text-[#080B14] text-sm">M</span>
           </div>
           <span className={`font-sans font-bold text-sm tracking-wide ${isDark ? 'text-[#F5C518]' : 'text-[#D4A912]'}`}>MentorMeUp</span>
         </Link>
+        {/* Active goal visible in the mobile top bar so multi-goal users can
+            switch without opening the hamburger. */}
+        <div className="flex-1 flex justify-center min-w-0 px-2">
+          <GoalSwitcher variant="mobile-topbar" />
+        </div>
         <button
           onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
           className={`p-2 transition-colors ${isDark ? 'text-[rgba(255,255,255,0.7)] hover:text-white' : 'text-[rgba(0,0,0,0.6)] hover:text-[rgba(0,0,0,0.9)]'}`}
@@ -149,9 +154,14 @@ export function SidebarNav() {
           <span className={`hidden lg:block font-sans font-bold text-base tracking-wide ${isDark ? 'text-[#F5C518]' : 'text-[#D4A912]'}`}>MentorMeUp</span>
         </Link>
 
-        {/* Goal Switcher - Desktop */}
+        {/* Goal Switcher - Desktop: compact on 72px sidebar, full on 240px. */}
         <div className="px-3 lg:px-4 mb-4">
-          <GoalSwitcher />
+          <div className="lg:hidden flex justify-center">
+            <GoalSwitcher variant="compact" />
+          </div>
+          <div className="hidden lg:block">
+            <GoalSwitcher />
+          </div>
         </div>
 
         {/* Nav Items */}
