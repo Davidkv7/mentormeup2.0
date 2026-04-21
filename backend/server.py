@@ -2491,8 +2491,8 @@ async def _generate_and_save_path_options(
 
         MODEL_ATTEMPTS = [
             ("anthropic", "claude-sonnet-4-6"),
-            ("openai", "gpt-4o"),
             ("openai", "gpt-4o-mini"),
+            ("openai", "gpt-4o"),
         ]
         last_exc: Exception | None = None
         parsed: dict[str, Any] | None = None
@@ -2616,8 +2616,8 @@ async def _expand_option_to_path(
 
         MODEL_ATTEMPTS = [
             ("anthropic", "claude-sonnet-4-6"),
-            ("openai", "gpt-4o"),
             ("openai", "gpt-4o-mini"),
+            ("openai", "gpt-4o"),
             ("gemini", "gemini-2.0-flash"),
         ]
         last_exc: Exception | None = None
@@ -2709,11 +2709,16 @@ async def build_path_options(goal_id: str, user: User = Depends(get_current_user
     existing = await db.path_options.find_one({"goal_id": goal_id}, {"_id": 0})
     if existing:
         expires = existing.get("cache_expires_at")
-        if isinstance(expires, datetime) and expires > _now():
-            await db.goals.update_one(
-                {"goal_id": goal_id}, {"$set": {"intake_status": "options_ready"}}
-            )
-            return {"ok": True, "status": "options_ready", "cached": True}
+        if isinstance(expires, datetime):
+            # MongoDB may return naive datetimes; normalize to UTC-aware for comparison.
+            if expires.tzinfo is None:
+                expires = expires.replace(tzinfo=timezone.utc)
+            if expires > _now():
+                await db.goals.update_one(
+                    {"goal_id": goal_id},
+                    {"$set": {"intake_status": "options_ready"}, "$unset": {"intake_error": ""}},
+                )
+                return {"ok": True, "status": "options_ready", "cached": True}
 
     await db.goals.update_one(
         {"goal_id": goal_id},

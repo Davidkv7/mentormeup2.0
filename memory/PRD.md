@@ -214,7 +214,65 @@ MongoDB: users, user_sessions, user_state, goals, paths, chat_messages,
 - **Rate cap**: `response_to_tone.*.rate` capped at 100% (a user can
   complete multiple tasks per nudge window).
 
-## What's Been Implemented
+### Session 12 — Multi-path selector (Session B) with Tavily web search
+- **New `path_options` collection** — one doc per goal with `options[3]`,
+  `coach_recommendation`, `tavily_cache`, `generated_at`, `cache_expires_at`
+  (+7 days). Feeds Session B UI.
+- **3 parallel Tavily searches per goal** — evidence-based framework /
+  fastest approach / sustainable long-term system. Results are fed into
+  Claude Sonnet 4.6 alongside the full intake transcript + Session A
+  behavioral profile. Claude returns exactly 3 named path options (one per
+  angle), each with tagline, timeline, intensity, why_this_fits,
+  key_milestones, sources, and a single `recommended: true` flag.
+- **Naming guardrail enforced in system prompt** — path names must be
+  "evocative but immediately legible in under 2 seconds". Good: "The
+  Steady Build". Bad: "Quantum Momentum". Verified names from test runs:
+  "The Conversation-First Build", "The 90-Day Sprint", "Talk Every Day
+  Sprint", "The Morning Habit Stack" — all pass.
+- **New endpoints**:
+  - `POST /api/paths/build-options/{goal_id}` — idempotent; returns
+    `{cached: true}` if fresh options exist (< 7d), else kicks off
+    generation in background. Tolerates Mongo's naive datetimes.
+  - `GET /api/paths/options/{goal_id}` — returns options doc or 404 with
+    `reason: "not_ready"` + `intake_status`.
+  - `POST /api/paths/select-option/{goal_id}` body `{option_id}` — spawns
+    `_expand_option_to_path` which runs `PATH_BUILDER_SYSTEM_PROMPT`
+    constrained by the chosen option and writes the full path doc with
+    `selected_option_id`, `selected_option_name`, `selected_option_angle`,
+    `sources`, `coach_recommendation`, `path_change_deadline` (now +24h).
+- **Intake completion flow swapped** — `[INTAKE_COMPLETE]` now sets
+  `intake_status = "building_options"` and fires
+  `_generate_and_save_path_options` instead of `_generate_and_save_path`.
+  Legacy `building_path` still works for anything that bypasses Session B.
+- **Undo within 24h** — clicking "Change path" on the `/path` page
+  navigates back to `/path/select` which reuses cached Tavily+Claude
+  options (no Tavily spend). Picking a different option calls
+  `_expand_option_to_path` which `delete_many`s the old path and writes
+  a new one with an updated deadline. Cheap because only the
+  PATH_BUILDER Claude call reruns.
+- **Frontend `/path/select` page** — new route with loading animation
+  (rotating copy: "Researching evidence-based approaches…", etc.),
+  coach recommendation banner at top, 3 stacked `OptionCard`s with
+  angle chip (Evidence-based / Fastest / Sustainable, colour-coded),
+  "Coach pick" gold badge, timeline + intensity row, why_this_fits,
+  key_milestones with coloured checks, collapsible "View sources (N)"
+  per card, and a sticky "Build this path" CTA at the bottom.
+- **Frontend `/path` page** — shows a "Change path · Nh left to switch
+  · picked {option_name}" pill inside the existing trust-layer card
+  when `path_change_deadline` is in the future. A new "Research behind
+  this path" section at the bottom renders real Tavily source links.
+- **Frontend `/intake` page** — auto-redirects to `/path/select?
+  goal_id={goal_id}` whenever `intake_status` is `building_options`
+  or `options_ready`, keeping the old `/path` redirect only for the
+  legacy `building_path` case.
+- **LLM fallback reorder** — fallback chain now prefers `gpt-4o-mini`
+  over `gpt-4o` because the Emergent key's monthly budget burns faster
+  on full gpt-4o. Chain for both options + expansion: `claude-sonnet-4-6
+  → gpt-4o-mini → gpt-4o (→ gemini-2.0-flash for expansion only)`.
+- **Fixed**: naive-vs-aware datetime bug in cache-hit comparison
+  (`cache_expires_at` stored by Mongo without tzinfo).
+
+
 
 ### Sessions 1–4 — Foundation
 - GitHub pull, env setup, framer-motion Turbopack fix, code-review security
@@ -285,9 +343,16 @@ MongoDB: users, user_sessions, user_state, goals, paths, chat_messages,
 - [ ] Wire the `/coach` full-page route (currently just opens the widget).
 
 ## Next Action Items (for next agent)
-1. Ship P1 struggle-detection logic on top of the activity log.
-2. Add per-user timezone for a correct local 20:00 evening check-in.
-3. Streaming coach responses (SSE).
+1. Session B end-to-end shipped and verified. Next candidates:
+   - Top up the Emergent LLM key (currently exhausted at $5.05/$5.00 —
+     only `claude-sonnet-4-6` + `gpt-4o-mini` are reliably in budget).
+   - Wire a "Regenerate with 3 options" button on legacy goals that
+     were built before Session B (currently Session B only applies to
+     new goals).
+   - Refactor `server.py` (3,600+ lines) into `/app/backend/routes/*`
+     and `/app/backend/models/*`.
+2. P2: `/health` + `/health/connect` (deferred until real users ask).
+3. P2: `/notes/ai-summary` weekly Claude job (deferred).
 
 ## Critical Guardrails (DON'T violate)
 - **Auth**: don't revert to cookies; localStorage Bearer tokens are
