@@ -386,6 +386,70 @@ async def logout(
     return {"ok": True}
 
 
+# --- TEMPORARY DEV LOGIN (toggle with DEV_LOGIN_ENABLED in backend/.env) ----
+# Flip to "false" to force everyone back through Emergent Google OAuth.
+DEV_LOGIN_ENABLED = os.environ.get("DEV_LOGIN_ENABLED", "false").lower() == "true"
+DEV_LOGIN_EMAIL = "dev@mentormeup.local"
+DEV_LOGIN_NAME = "Dev Tester"
+
+
+@app.get("/api/auth/dev-login-enabled")
+async def dev_login_enabled():
+    return {"enabled": DEV_LOGIN_ENABLED}
+
+
+@app.post("/api/auth/dev-login")
+async def dev_login(response: Response):
+    """Create (or reuse) a fixed test user and return a session token.
+
+    Gated by DEV_LOGIN_ENABLED — returns 404 when the flag is off so it
+    matches a disabled route rather than leaking capability.
+    """
+    if not DEV_LOGIN_ENABLED:
+        raise HTTPException(status_code=404, detail="Not found")
+
+    existing = await db.users.find_one({"email": DEV_LOGIN_EMAIL}, {"_id": 0})
+    if existing:
+        user_id = existing["user_id"]
+    else:
+        user_id = f"user_{uuid.uuid4().hex[:12]}"
+        await db.users.insert_one(
+            {
+                "user_id": user_id,
+                "email": DEV_LOGIN_EMAIL,
+                "name": DEV_LOGIN_NAME,
+                "picture": None,
+                "created_at": _now(),
+            }
+        )
+
+    session_token = f"devtok_{uuid.uuid4().hex}"
+    expires_at = _now() + timedelta(days=SESSION_DURATION_DAYS)
+    await db.user_sessions.insert_one(
+        {
+            "user_id": user_id,
+            "session_token": session_token,
+            "emergent_session_id": f"dev:{session_token}",
+            "expires_at": expires_at,
+            "created_at": _now(),
+        }
+    )
+    response.set_cookie(
+        key="session_token",
+        value=session_token,
+        httponly=True,
+        secure=True,
+        samesite="none",
+        path="/",
+        max_age=SESSION_DURATION_DAYS * 24 * 60 * 60,
+    )
+    user_doc = await db.users.find_one({"user_id": user_id}, {"_id": 0})
+    return {
+        "user": User(**user_doc).model_dump(mode="json"),
+        "session_token": session_token,
+    }
+
+
 # ------------------------------------------------------------------ preferences
 COACHING_STYLE_DESCRIPTIONS: dict[str, str] = {
     "gentle": (

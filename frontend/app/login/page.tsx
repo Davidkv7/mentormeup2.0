@@ -1,18 +1,22 @@
 "use client";
 
 import { motion } from "motion/react";
-import { ArrowRight, Sparkles } from "lucide-react";
+import { ArrowRight, Sparkles, Wrench } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useAuth } from "@/contexts/auth-context";
 import { useTheme } from "@/contexts/theme-context";
+import { api, setAuthToken, type AuthUser } from "@/lib/api";
 
 export default function LoginPage() {
-  const { status } = useAuth();
+  const { status, refresh } = useAuth();
   const { theme } = useTheme();
   const router = useRouter();
   const isDark = theme === "dark";
   const [redirecting, setRedirecting] = useState(false);
+  const [devLoading, setDevLoading] = useState(false);
+  const [devEnabled, setDevEnabled] = useState(false);
+  const [devError, setDevError] = useState<string | null>(null);
 
   // Already signed in? Send them home.
   useEffect(() => {
@@ -21,11 +25,44 @@ export default function LoginPage() {
     }
   }, [status, router]);
 
+  // Ask the backend whether dev login is enabled (DEV_LOGIN_ENABLED flag).
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const r = await api.get<{ enabled: boolean }>("/api/auth/dev-login-enabled");
+        if (!cancelled) setDevEnabled(r.enabled);
+      } catch {
+        if (!cancelled) setDevEnabled(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   const handleLogin = () => {
     setRedirecting(true);
     // REMINDER: DO NOT HARDCODE THE URL, OR ADD ANY FALLBACKS OR REDIRECT URLS, THIS BREAKS THE AUTH
     const redirectUrl = `${window.location.origin}/`;
     window.location.href = `https://auth.emergentagent.com/?redirect=${encodeURIComponent(redirectUrl)}`;
+  };
+
+  const handleDevLogin = async () => {
+    setDevError(null);
+    setDevLoading(true);
+    try {
+      const res = await api.post<{ user: AuthUser; session_token: string }>(
+        "/api/auth/dev-login",
+        {},
+      );
+      setAuthToken(res.session_token);
+      await refresh();
+      router.replace("/");
+    } catch {
+      setDevError("Dev login failed. Is DEV_LOGIN_ENABLED=true?");
+      setDevLoading(false);
+    }
   };
 
   return (
@@ -107,6 +144,49 @@ export default function LoginPage() {
           >
             We use Google for secure sign-in. Your coach starts the moment you land on the home screen.
           </p>
+
+          {devEnabled && (
+            <div
+              className={`mt-6 pt-5 border-t ${
+                isDark ? "border-[rgba(255,255,255,0.08)]" : "border-[rgba(0,0,0,0.08)]"
+              }`}
+              data-testid="dev-login-block"
+            >
+              <p
+                className={`font-mono text-[10px] uppercase tracking-[0.15em] mb-3 ${
+                  isDark ? "text-[rgba(245,197,24,0.65)]" : "text-[#D4A912]"
+                }`}
+              >
+                Dev mode
+              </p>
+              <button
+                type="button"
+                onClick={handleDevLogin}
+                disabled={devLoading}
+                data-testid="dev-login-button"
+                className={`w-full inline-flex items-center justify-center gap-2 px-5 py-3 rounded-full font-sans font-semibold text-sm transition-colors border-2 ${
+                  isDark
+                    ? "border-[rgba(245,197,24,0.4)] text-[#F5C518] hover:bg-[rgba(245,197,24,0.1)]"
+                    : "border-[rgba(212,169,18,0.4)] text-[#D4A912] hover:bg-[rgba(245,197,24,0.08)]"
+                } disabled:opacity-50`}
+              >
+                <Wrench className="w-4 h-4" />
+                {devLoading ? "Signing in…" : "Skip login (dev)"}
+              </button>
+              {devError && (
+                <p className="mt-2 font-mono text-[11px] text-red-400" data-testid="dev-login-error">
+                  {devError}
+                </p>
+              )}
+              <p
+                className={`mt-2 font-mono text-[10px] text-center ${
+                  isDark ? "text-[rgba(255,255,255,0.35)]" : "text-[rgba(0,0,0,0.35)]"
+                }`}
+              >
+                Signs in as dev@mentormeup.local. Toggle off via DEV_LOGIN_ENABLED.
+              </p>
+            </div>
+          )}
         </div>
       </motion.div>
     </main>
