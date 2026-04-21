@@ -137,6 +137,34 @@ class AuthSessionRequest(BaseModel):
     session_id: str
 
 
+# ---- Preferences ----
+CoachingStyle = Literal["gentle", "balanced", "direct", "tough"]
+MessageFrequency = Literal["minimal", "moderate", "frequent"]
+PreferredWorkTime = Literal["morning", "afternoon", "evening", "flexible"]
+
+
+class UserPreferences(BaseModel):
+    display_name: str
+    timezone: str = "UTC"
+    coaching_style: CoachingStyle = "balanced"
+    message_frequency: MessageFrequency = "moderate"
+    proactive_checkins: bool = True
+    preferred_work_time: PreferredWorkTime = "flexible"
+
+
+class UserPreferencesUpdate(BaseModel):
+    display_name: str | None = None
+    timezone: str | None = None
+    coaching_style: CoachingStyle | None = None
+    message_frequency: MessageFrequency | None = None
+    proactive_checkins: bool | None = None
+    preferred_work_time: PreferredWorkTime | None = None
+
+
+class DeleteAccountRequest(BaseModel):
+    confirmation: str
+
+
 # ------------------------------------------------------------------ helpers
 GOAL_COLORS: list[str] = ["gold", "cyan", "purple", "green", "red"]
 
@@ -356,6 +384,199 @@ async def logout(
     return {"ok": True}
 
 
+# ------------------------------------------------------------------ preferences
+COACHING_STYLE_DESCRIPTIONS: dict[str, str] = {
+    "gentle": (
+        "Speak softly. Reassure before challenging. Lead with empathy, never pressure. "
+        "Celebrate small wins. When they're struggling, normalise it before redirecting."
+    ),
+    "balanced": (
+        "Warm but candid. Mix encouragement with honest pushback. Default tone."
+    ),
+    "direct": (
+        "Cut to the point. Light on pleasantries, heavy on specifics. "
+        "Tell them what to do next; don't dance around it."
+    ),
+    "tough": (
+        "No hand-holding. Call out avoidance, excuses, weak plans directly. "
+        "Respect them enough to be blunt. Brief. High standards. Still kind underneath."
+    ),
+}
+
+PREFERRED_WORK_TIME_DESCRIPTIONS: dict[str, str] = {
+    "morning": (
+        "The user does their best deep work in the MORNING. When suggesting when to do "
+        "a task or scheduling, default to morning slots. Frame evenings as recovery."
+    ),
+    "afternoon": (
+        "The user does their best deep work in the AFTERNOON. Default new work slots "
+        "to afternoon. Mornings are for warm-up and planning."
+    ),
+    "evening": (
+        "The user does their best deep work in the EVENING. Default new work slots to "
+        "evening. Don't push morning heavy work unless they ask."
+    ),
+    "flexible": (
+        "The user hasn't picked a preferred focus window — ask before scheduling if "
+        "timing matters."
+    ),
+}
+
+
+def _default_preferences(user: User) -> UserPreferences:
+    return UserPreferences(display_name=user.name)
+
+
+async def _load_preferences(user: User) -> UserPreferences:
+    doc = await db.user_preferences.find_one({"user_id": user.user_id}, {"_id": 0, "user_id": 0})
+    if not doc:
+        return _default_preferences(user)
+    # Merge with defaults so missing fields don't break the model.
+    base = _default_preferences(user).model_dump()
+    base.update({k: v for k, v in doc.items() if v is not None})
+    return UserPreferences(**base)
+
+
+@app.get("/api/users/me/preferences", response_model=UserPreferences)
+async def get_preferences(user: User = Depends(get_current_user)):
+    return await _load_preferences(user)
+
+
+@app.patch("/api/users/me/preferences", response_model=UserPreferences)
+async def patch_preferences(
+    body: UserPreferencesUpdate,
+    user: User = Depends(get_current_user),
+):
+    updates = {k: v for k, v in body.model_dump(exclude_unset=True).items() if v is not None}
+    if not updates:
+        return await _load_preferences(user)
+    updates["updated_at"] = _now()
+    await db.user_preferences.update_one(
+        {"user_id": user.user_id},
+        {"$set": updates, "$setOnInsert": {"user_id": user.user_id, "created_at": _now()}},
+        upsert=True,
+    )
+    # If they changed their display name, mirror it to the user doc so
+    # /api/auth/me also reflects the change.
+    if "display_name" in updates:
+        await db.users.update_one(
+            {"user_id": user.user_id}, {"$set": {"name": updates["display_name"]}}
+        )
+    await _log_activity(
+        user.user_id,
+        "preferences.updated",
+        "Updated coaching preferences",
+        {"fields": list(updates.keys())},
+    )
+    return await _load_preferences(user)
+
+
+# ------------------------------------------------------------------ goal context (for settings page)
+@app.get("/api/users/me/goal-context")
+async def get_goal_context(user: User = Depends(get_current_user)):
+    """Read-only summary of what the coach knows about the user — their intake
+    answers, goal by goal. Shown on the Settings page so users can verify the
+    coach's understanding."""
+    goals_cursor = (
+        db.goals.find({"user_id": user.user_id}, {"_id": 0})
+        .sort("created_at", 1)
+    )
+    goals = [g async for g in goals_cursor]
+
+    result: list[dict[str, Any]] = []
+    for goal in goals:
+        msgs_cursor = (
+            db.intake_messages.find(
+                {"goal_id": goal["goal_id"], "user_id": user.user_id, "role": "user"},
+                {"_id": 0, "content": 1, "created_at": 1},
+            ).sort("created_at", 1)
+        )
+        user_answers = [
+            {
+                "content": m["content"],
+                "created_at": (
+                    m["created_at"].isoformat() if isinstance(m["created_at"], datetime)
+                    else m["created_at"]
+                ),
+            }
+            async for m in msgs_cursor
+        ]
+        result.append({
+            "goal_id": goal["goal_id"],
+            "title": goal["title"],
+            "status": goal.get("status", "active"),
+            "intake_status": goal.get("intake_status", "not_started"),
+            "created_at": (
+                goal["created_at"].isoformat() if isinstance(goal.get("created_at"), datetime)
+                else goal.get("created_at")
+            ),
+            "user_answers": user_answers,
+        })
+    return {"goals": result}
+
+
+# ------------------------------------------------------------------ delete account
+@app.delete("/api/users/me")
+async def delete_account(
+    body: DeleteAccountRequest,
+    response: Response,
+    user: User = Depends(get_current_user),
+):
+    """Cascading, auditable account deletion. The client MUST send
+    `{"confirmation": "DELETE"}` — any other value is rejected."""
+    if body.confirmation != "DELETE":
+        raise HTTPException(
+            status_code=400,
+            detail="Confirmation text must be exactly 'DELETE' (all caps).",
+        )
+
+    # Pre-compute counts so the audit log captures what we removed.
+    counts = {
+        "activity_events": await db.activity_events.count_documents({"user_id": user.user_id}),
+        "notes": await db.notes.count_documents({"user_id": user.user_id}),
+        "calendar_events": await db.calendar_events.count_documents({"user_id": user.user_id}),
+        "paths": await db.paths.count_documents({"user_id": user.user_id}),
+        "goals": await db.goals.count_documents({"user_id": user.user_id}),
+        "intake_messages": await db.intake_messages.count_documents({"user_id": user.user_id}),
+        "chat_messages": await db.chat_messages.count_documents({"user_id": user.user_id}),
+    }
+
+    # 1) Write the audit trail BEFORE touching anything. If the audit write
+    #    fails, we abort — irreversible actions require a trail.
+    audit_doc = {
+        "audit_id": f"audit_{uuid.uuid4().hex[:12]}",
+        "action": "account.deleted",
+        "user_id": user.user_id,
+        "email": user.email,
+        "name": user.name,
+        "deleted_at": _now(),
+        "counts": counts,
+    }
+    await db.account_deletion_audit.insert_one(audit_doc)
+
+    # 2) Cascade delete in the exact order David asked for:
+    #    activity_events → notes → calendar_events → paths → goals → user.
+    #    (We also clean up derivative collections — intake_messages,
+    #    chat_messages, user_state, user_preferences, user_sessions — before
+    #    the user doc so no orphans remain.)
+    await db.activity_events.delete_many({"user_id": user.user_id})
+    await db.notes.delete_many({"user_id": user.user_id})
+    await db.calendar_events.delete_many({"user_id": user.user_id})
+    await db.paths.delete_many({"user_id": user.user_id})
+    await db.goals.delete_many({"user_id": user.user_id})
+    await db.intake_messages.delete_many({"user_id": user.user_id})
+    await db.chat_messages.delete_many({"user_id": user.user_id})
+    await db.user_state.delete_many({"user_id": user.user_id})
+    await db.user_preferences.delete_many({"user_id": user.user_id})
+    await db.user_sessions.delete_many({"user_id": user.user_id})
+    await db.users.delete_one({"user_id": user.user_id})
+
+    # 3) Clear the auth cookie so the client can't keep pretending to be
+    #    signed in after their user row is gone.
+    response.delete_cookie("session_token", path="/", samesite="none", secure=True)
+    return {"ok": True, "audit_id": audit_doc["audit_id"], "deleted": counts}
+
+
 # ------------------------------------------------------------------ goals
 @app.get("/api/goals")
 async def list_goals(user: User = Depends(get_current_user)):
@@ -552,6 +773,12 @@ Assistant: That's a keeper. Saving it against your active goal.
 Warm, direct, human. Short sentences. No emoji spam. No markdown headings.
 Challenge weak plans, celebrate real progress.
 
+# PERSONAL TONE OVERRIDE (from this user's settings — follow this over the default style above)
+{coaching_style_note}
+
+# SCHEDULING PREFERENCE (when suggesting *when* to do something)
+{preferred_work_time_note}
+
 # USER CONTEXT (live data — reference specifically, don't speak in generalities)
 Today is {today_date}. Tomorrow is {tomorrow_date}.
 
@@ -646,12 +873,24 @@ async def coach_chat(body: ChatRequest, user: User = Depends(get_current_user)):
         {"_id": 0, "goal_id": 1},
     )
     example_goal_id = first_goal["goal_id"] if first_goal else "goal_xxx"
+
+    # Pull the user's saved coaching preferences so the coach adapts tone + timing.
+    prefs = await _load_preferences(user)
+    coaching_style_note = COACHING_STYLE_DESCRIPTIONS.get(
+        prefs.coaching_style, COACHING_STYLE_DESCRIPTIONS["balanced"]
+    )
+    preferred_work_time_note = PREFERRED_WORK_TIME_DESCRIPTIONS.get(
+        prefs.preferred_work_time, PREFERRED_WORK_TIME_DESCRIPTIONS["flexible"]
+    )
+
     system_prompt = COACH_SYSTEM_PROMPT.format(
         user_name=user.name,
         context=context,
         today_date=today.isoformat(),
         tomorrow_date=tomorrow.isoformat(),
         example_goal_id=example_goal_id,
+        coaching_style_note=coaching_style_note,
+        preferred_work_time_note=preferred_work_time_note,
     )
 
     # Load prior turns so Claude has the full thread.
@@ -758,6 +997,44 @@ async def coach_history(user: User = Depends(get_current_user), limit: int = 100
         .limit(limit)
     )
     return [doc async for doc in cursor]
+
+
+@app.get("/api/coach/_debug/system-prompt")
+async def coach_debug_system_prompt(user: User = Depends(get_current_user)):
+    """Returns the exact system prompt that the next /api/coach/chat call will
+    assemble for this user. Auth-scoped — you can only see your own. Used to
+    verify that preference changes (coaching style, preferred work time) are
+    flowing into Claude."""
+    context = await _build_coach_context(user)
+    today = _now().date()
+    tomorrow = today + timedelta(days=1)
+    first_goal = await db.goals.find_one(
+        {"user_id": user.user_id, "status": {"$in": ["active", "paused"]}},
+        {"_id": 0, "goal_id": 1},
+    )
+    example_goal_id = first_goal["goal_id"] if first_goal else "goal_xxx"
+    prefs = await _load_preferences(user)
+    coaching_style_note = COACHING_STYLE_DESCRIPTIONS.get(
+        prefs.coaching_style, COACHING_STYLE_DESCRIPTIONS["balanced"]
+    )
+    preferred_work_time_note = PREFERRED_WORK_TIME_DESCRIPTIONS.get(
+        prefs.preferred_work_time, PREFERRED_WORK_TIME_DESCRIPTIONS["flexible"]
+    )
+    prompt = COACH_SYSTEM_PROMPT.format(
+        user_name=user.name,
+        context=context,
+        today_date=today.isoformat(),
+        tomorrow_date=tomorrow.isoformat(),
+        example_goal_id=example_goal_id,
+        coaching_style_note=coaching_style_note,
+        preferred_work_time_note=preferred_work_time_note,
+    )
+    return {
+        "system_prompt": prompt,
+        "preferences": prefs.model_dump(),
+        "coaching_style_note": coaching_style_note,
+        "preferred_work_time_note": preferred_work_time_note,
+    }
 
 
 # ------------------------------------------------------------------ health
@@ -1919,11 +2196,212 @@ async def trigger_evening_checkin(user: User = Depends(get_current_user)):
     return {"ok": True, **result}
 
 
+# =====================================================================
+# STRUGGLE DETECTION (proactive coaching)
+# =====================================================================
+#
+# The product promise is "AI that gets you there" — that means noticing when
+# you're stuck before you say it. Every time the user opens /daily, the
+# frontend emits a `task.viewed` activity event with the current incomplete
+# task's id. If that task has been viewed 3+ times in the last 24h without a
+# matching `task.completed`, the coach reaches out with a soft, specific
+# question about what's actually getting in the way.
+#
+# Guards:
+#   • Honors `user_preferences.proactive_checkins` (skip when off).
+#   • Idempotent per-user-per-task-per-day: we stamp user_state.struggle_nudges
+#     so the user doesn't get nudged twice for the same stuck task.
+#
+STRUGGLE_THRESHOLD = 3
+STRUGGLE_WINDOW = timedelta(hours=24)
+
+STRUGGLE_NUDGE_PROMPT = """You are the MentorMeUp Coach. {user_name} has opened this task {view_count} times in the last 24 hours without completing it. That's avoidance — not laziness. Something about this task is harder than it looks, or something else in their life is in the way.
+
+Send ONE short message (2–3 sentences max):
+1. Name what you've noticed — specifically, by task title and the count.
+2. Ask ONE open, non-judgmental question about what's actually blocking them. Don't list options; let them tell you.
+3. Do NOT reschedule, complete, or offer a new task yet — you need their answer first.
+
+No markdown headings. No bullet lists. No emoji spam. No action tags. Sound like a friend who's been paying attention.
+
+Task: {task_title} ({task_duration} min)
+Why it matters today: {task_why}
+Goal: {goal_title}
+
+Write the message now."""
+
+
+async def _generate_struggle_nudge(
+    user_doc: dict[str, Any],
+    path_doc: dict[str, Any],
+    task_doc: dict[str, Any],
+    view_count: int,
+) -> str | None:
+    try:
+        prompt = STRUGGLE_NUDGE_PROMPT.format(
+            user_name=user_doc.get("name", "there"),
+            view_count=view_count,
+            task_title=task_doc.get("title", "your task"),
+            task_duration=task_doc.get("duration_minutes", 10),
+            task_why=task_doc.get("why_today", ""),
+            goal_title=path_doc.get("goal_title", "your goal"),
+        )
+        chat = LlmChat(
+            api_key=EMERGENT_LLM_KEY,
+            session_id=f"struggle:{user_doc['user_id']}:{uuid.uuid4().hex[:6]}",
+            system_message=prompt,
+        ).with_model(COACH_MODEL_PROVIDER, COACH_MODEL_NAME)
+        reply = await chat.send_message(UserMessage(text="Send the nudge."))
+        return reply.strip() if reply else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+async def _process_struggle_for_user(user_doc: dict[str, Any]) -> dict[str, Any] | None:
+    """Scan one user's activity. Returns a debug dict if a nudge was sent,
+    None if nothing to do."""
+    user_id = user_doc["user_id"]
+
+    # Respect the user's proactive-checkins preference.
+    prefs_doc = await db.user_preferences.find_one(
+        {"user_id": user_id}, {"_id": 0, "proactive_checkins": 1}
+    )
+    if prefs_doc is not None and prefs_doc.get("proactive_checkins") is False:
+        return None
+
+    # Find the active goal + path (same rule as evening-checkin).
+    goal = await db.goals.find_one(
+        {"user_id": user_id, "status": "active"}, {"_id": 0}
+    )
+    if not goal or not goal.get("path_id"):
+        return None
+    path = await db.paths.find_one({"path_id": goal["path_id"]}, {"_id": 0})
+    if not path:
+        return None
+
+    # Walk the tree to find the next incomplete task.
+    stuck_task: dict[str, Any] | None = None
+    for ph in path["phases"]:
+        for ms in ph["milestones"]:
+            for st in ms["steps"]:
+                for t in st["micro_tasks"]:
+                    if not t.get("completed"):
+                        stuck_task = t
+                        break
+                if stuck_task:
+                    break
+            if stuck_task:
+                break
+        if stuck_task:
+            break
+    if not stuck_task:
+        return None
+
+    task_id = stuck_task.get("task_id")
+    if not task_id:
+        return None
+
+    window_start = _now() - STRUGGLE_WINDOW
+
+    # If we've already nudged for this task in the last window, skip.
+    state = await db.user_state.find_one({"user_id": user_id}, {"_id": 0}) or {}
+    last_nudges: dict[str, str] = state.get("struggle_nudges", {}) or {}
+    last_iso = last_nudges.get(task_id)
+    if last_iso:
+        try:
+            last_dt = datetime.fromisoformat(last_iso)
+            if last_dt.tzinfo is None:
+                last_dt = last_dt.replace(tzinfo=timezone.utc)
+            if last_dt >= window_start:
+                return None
+        except ValueError:
+            pass
+
+    # If the task was completed in the window, nothing to do (shouldn't happen
+    # since we only get here when task is incomplete, but defensive).
+    completed_in_window = await db.activity_events.count_documents({
+        "user_id": user_id,
+        "kind": "task.completed",
+        "payload.task_id": task_id,
+        "created_at": {"$gte": window_start},
+    })
+    if completed_in_window:
+        return None
+
+    # Count views of this task in the window.
+    view_count = await db.activity_events.count_documents({
+        "user_id": user_id,
+        "kind": "task.viewed",
+        "payload.task_id": task_id,
+        "created_at": {"$gte": window_start},
+    })
+    if view_count < STRUGGLE_THRESHOLD:
+        return None
+
+    nudge = await _generate_struggle_nudge(user_doc, path, stuck_task, view_count)
+    if not nudge:
+        return None
+
+    msg_id = f"msg_{uuid.uuid4().hex[:12]}"
+    await db.chat_messages.insert_one({
+        "message_id": msg_id,
+        "user_id": user_id,
+        "role": "assistant",
+        "content": nudge,
+        "actions": [],
+        "kind": "struggle_nudge",
+        "created_at": _now(),
+    })
+    # Stamp so we don't nudge again for this task in the same window.
+    last_nudges[task_id] = _now().isoformat()
+    await db.user_state.update_one(
+        {"user_id": user_id},
+        {"$set": {"struggle_nudges": last_nudges, "updated_at": _now()}},
+        upsert=True,
+    )
+    await _log_activity(
+        user_id,
+        "coach.struggle_nudge",
+        f"Struggle nudge sent for '{stuck_task['title']}' ({view_count} views)",
+        {"task_id": task_id, "view_count": view_count, "message_id": msg_id},
+    )
+    return {
+        "task_id": task_id,
+        "task_title": stuck_task["title"],
+        "view_count": view_count,
+        "message_id": msg_id,
+    }
+
+
+async def run_struggle_detection() -> dict[str, int]:
+    cursor = db.users.find({}, {"_id": 0})
+    scanned = 0
+    nudged = 0
+    async for user_doc in cursor:
+        scanned += 1
+        try:
+            if await _process_struggle_for_user(user_doc):
+                nudged += 1
+        except Exception:  # noqa: BLE001
+            continue
+    return {"scanned": scanned, "nudged": nudged}
+
+
+@app.post("/api/coach/struggle-detection/run")
+async def trigger_struggle_detection(user: User = Depends(get_current_user)):
+    """Manual trigger for dev/testing. In production, the background loop
+    runs this every 15 minutes."""
+    result = await run_struggle_detection()
+    return {"ok": True, **result}
+
+
 # ----- Background scheduler -------------------------------------------------
 
 CHECKIN_LOOP_INTERVAL_SECONDS = 300  # 5 minutes
 CHECKIN_WINDOW_START_HOUR = 20  # 20:00 UTC
 CHECKIN_WINDOW_END_HOUR = 21  # up to 21:00 UTC
+
+STRUGGLE_LOOP_INTERVAL_SECONDS = 900  # 15 minutes
 
 
 async def _evening_checkin_loop() -> None:
@@ -1939,6 +2417,21 @@ async def _evening_checkin_loop() -> None:
         await asyncio.sleep(CHECKIN_LOOP_INTERVAL_SECONDS)
 
 
+async def _struggle_detection_loop() -> None:
+    import sys
+    # Small initial delay so we don't pile on at startup.
+    await asyncio.sleep(60)
+    while True:
+        try:
+            result = await run_struggle_detection()
+            if result["nudged"]:
+                print(f"[struggle_detection] {result}", file=sys.stderr, flush=True)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[struggle_detection] error: {exc}", file=sys.stderr, flush=True)
+        await asyncio.sleep(STRUGGLE_LOOP_INTERVAL_SECONDS)
+
+
 @app.on_event("startup")
 async def _start_background_tasks() -> None:
     asyncio.create_task(_evening_checkin_loop())
+    asyncio.create_task(_struggle_detection_loop())

@@ -1,70 +1,85 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { motion } from "motion/react";
+import { useRouter } from "next/navigation";
 import {
   User,
-  Bell,
   Brain,
-  Calendar,
   Palette,
-  Link2,
   ChevronRight,
   Moon,
   Sun,
   Download,
   Trash2,
   LogOut,
+  AlertTriangle,
+  Target,
+  FileText,
+  Check,
+  Loader2,
 } from "lucide-react";
 import { SidebarNav } from "@/components/sidebar-nav";
 import { useTheme } from "@/contexts/theme-context";
+import { useAuth } from "@/contexts/auth-context";
+import {
+  api,
+  ApiError,
+  setAuthToken,
+  type ApiUserPreferences,
+  type ApiGoalContextItem,
+  type CoachingStyle,
+  type MessageFrequency,
+  type PreferredWorkTime,
+} from "@/lib/api";
 
-// Toggle Switch Component
+// --------- Small subcomponents (design preserved verbatim) ---------
+
 function ToggleSwitch({
   enabled,
   onToggle,
-  size = "default",
   isDark = true,
+  testId,
 }: {
   enabled: boolean;
   onToggle: () => void;
-  size?: "default" | "small";
   isDark?: boolean;
+  testId?: string;
 }) {
-  const isSmall = size === "small";
   return (
     <button
+      type="button"
       onClick={onToggle}
-      className={`relative rounded-full transition-all duration-300 ${
-        isSmall ? "w-10 h-5" : "w-12 h-6"
-      } ${
+      data-testid={testId}
+      className={`relative rounded-full transition-all duration-300 w-12 h-6 ${
         enabled
           ? "bg-gradient-to-r from-[#F5C518] to-[#D4A912]"
-          : isDark ? "bg-[rgba(255,255,255,0.1)]" : "bg-[rgba(0,0,0,0.1)]"
+          : isDark
+            ? "bg-[rgba(255,255,255,0.1)]"
+            : "bg-[rgba(0,0,0,0.1)]"
       }`}
     >
       <motion.div
-        animate={{ x: enabled ? (isSmall ? 20 : 24) : 2 }}
+        animate={{ x: enabled ? 24 : 2 }}
         transition={{ type: "spring", stiffness: 500, damping: 30 }}
-        className={`absolute top-1 rounded-full bg-white shadow-md ${
-          isSmall ? "w-3 h-3" : "w-4 h-4"
-        }`}
+        className="absolute top-1 rounded-full bg-white shadow-md w-4 h-4"
       />
     </button>
   );
 }
 
-// Settings Section Component
 function SettingsSection({
   icon: Icon,
   title,
   children,
   delay = 0,
+  testId,
 }: {
   icon: React.ElementType;
   title: string;
   children: React.ReactNode;
   delay?: number;
+  testId?: string;
 }) {
   return (
     <motion.div
@@ -72,6 +87,7 @@ function SettingsSection({
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.5, delay }}
       className="glass-card p-4 sm:p-6"
+      data-testid={testId}
     >
       <div className="flex items-center gap-3 mb-5">
         <div className="w-9 h-9 rounded-xl bg-[rgba(245,197,24,0.12)] flex items-center justify-center">
@@ -86,7 +102,6 @@ function SettingsSection({
   );
 }
 
-// Settings Row Component
 function SettingsRow({
   label,
   description,
@@ -99,7 +114,11 @@ function SettingsRow({
   isDark?: boolean;
 }) {
   return (
-    <div className={`flex items-center justify-between py-3 border-b last:border-0 ${isDark ? "border-[rgba(255,255,255,0.04)]" : "border-[rgba(0,0,0,0.06)]"}`}>
+    <div
+      className={`flex items-center justify-between py-3 border-b last:border-0 ${
+        isDark ? "border-[rgba(255,255,255,0.04)]" : "border-[rgba(0,0,0,0.06)]"
+      }`}
+    >
       <div className="flex-1 min-w-0 mr-4">
         <p className="font-mono text-sm text-foreground">{label}</p>
         {description && (
@@ -113,30 +132,36 @@ function SettingsRow({
   );
 }
 
-// Select Dropdown Component
 function SelectDropdown({
   value,
   onChange,
   options,
   isDark = true,
+  testId,
 }: {
   value: string;
   onChange: (value: string) => void;
   options: { value: string; label: string }[];
   isDark?: boolean;
+  testId?: string;
 }) {
   return (
     <select
       value={value}
       onChange={(e) => onChange(e.target.value)}
+      data-testid={testId}
       className={`rounded-lg px-3 py-1.5 font-mono text-xs text-foreground outline-none focus:border-[#F5C518] transition-colors cursor-pointer ${
-        isDark 
+        isDark
           ? "bg-[rgba(255,255,255,0.06)] border border-[rgba(255,255,255,0.08)]"
           : "bg-[rgba(0,0,0,0.04)] border border-[rgba(0,0,0,0.08)]"
       }`}
     >
       {options.map((opt) => (
-        <option key={opt.value} value={opt.value} className={isDark ? "bg-[#0D1117]" : "bg-white"}>
+        <option
+          key={opt.value}
+          value={opt.value}
+          className={isDark ? "bg-[#0D1117]" : "bg-white"}
+        >
           {opt.label}
         </option>
       ))}
@@ -144,36 +169,48 @@ function SelectDropdown({
   );
 }
 
-// Clickable Row Component
 function ClickableRow({
   icon: Icon,
   label,
   description,
   onClick,
   danger = false,
+  disabled = false,
   isDark = true,
+  testId,
 }: {
   icon: React.ElementType;
   label: string;
   description?: string;
   onClick: () => void;
   danger?: boolean;
+  disabled?: boolean;
   isDark?: boolean;
+  testId?: string;
 }) {
   return (
     <button
+      type="button"
       onClick={onClick}
+      disabled={disabled}
+      data-testid={testId}
       className={`w-full flex items-center gap-4 p-3 rounded-xl transition-all duration-200 ${
-        danger
-          ? "hover:bg-[rgba(239,68,68,0.1)]"
-          : isDark ? "hover:bg-[rgba(255,255,255,0.04)]" : "hover:bg-[rgba(0,0,0,0.04)]"
+        disabled
+          ? "opacity-50 cursor-not-allowed"
+          : danger
+            ? "hover:bg-[rgba(239,68,68,0.1)]"
+            : isDark
+              ? "hover:bg-[rgba(255,255,255,0.04)]"
+              : "hover:bg-[rgba(0,0,0,0.04)]"
       }`}
     >
       <div
         className={`w-9 h-9 rounded-xl flex items-center justify-center ${
           danger
             ? "bg-[rgba(239,68,68,0.12)]"
-            : isDark ? "bg-[rgba(255,255,255,0.06)]" : "bg-[rgba(0,0,0,0.04)]"
+            : isDark
+              ? "bg-[rgba(255,255,255,0.06)]"
+              : "bg-[rgba(0,0,0,0.04)]"
         }`}
       >
         <Icon
@@ -205,50 +242,253 @@ function ClickableRow({
   );
 }
 
+// -------------------------- Delete confirmation modal --------------------------
+function DeleteAccountModal({
+  open,
+  onClose,
+  onConfirm,
+  isDark,
+  busy,
+  error,
+}: {
+  open: boolean;
+  onClose: () => void;
+  onConfirm: () => void;
+  isDark: boolean;
+  busy: boolean;
+  error: string | null;
+}) {
+  const [typed, setTyped] = useState("");
+  useEffect(() => {
+    if (!open) setTyped("");
+  }, [open]);
+  if (!open) return null;
+  const canDelete = typed === "DELETE" && !busy;
+  return (
+    <div
+      className="fixed inset-0 z-[100] flex items-center justify-center p-4"
+      style={{ background: "rgba(0,0,0,0.65)", backdropFilter: "blur(8px)" }}
+      onClick={onClose}
+      data-testid="delete-account-modal"
+    >
+      <motion.div
+        initial={{ opacity: 0, y: 20, scale: 0.96 }}
+        animate={{ opacity: 1, y: 0, scale: 1 }}
+        transition={{ duration: 0.25 }}
+        onClick={(e) => e.stopPropagation()}
+        className={`max-w-md w-full rounded-2xl p-6 ${
+          isDark ? "bg-[#0D1117]" : "bg-white"
+        } border ${
+          isDark
+            ? "border-[rgba(239,68,68,0.3)]"
+            : "border-[rgba(239,68,68,0.25)]"
+        }`}
+        style={{ boxShadow: "0 20px 60px rgba(239,68,68,0.15)" }}
+      >
+        <div className="flex items-center gap-3 mb-4">
+          <div className="w-10 h-10 rounded-xl bg-[rgba(239,68,68,0.12)] flex items-center justify-center">
+            <AlertTriangle className="w-5 h-5 text-[#EF4444]" />
+          </div>
+          <h3 className="font-sans font-bold text-foreground text-lg">
+            Delete your account?
+          </h3>
+        </div>
+        <p className="font-mono text-sm text-muted-foreground mb-4 leading-relaxed">
+          This permanently deletes your profile, goals, paths, notes, calendar,
+          chat history, and activity log. You can&apos;t undo this.
+        </p>
+        <p className="font-mono text-xs text-muted-foreground mb-2">
+          Type <span className="font-bold text-[#EF4444]">DELETE</span> to confirm.
+        </p>
+        <input
+          type="text"
+          value={typed}
+          onChange={(e) => setTyped(e.target.value)}
+          placeholder="DELETE"
+          autoFocus
+          data-testid="delete-account-confirm-input"
+          className={`w-full rounded-lg px-3 py-2 font-mono text-sm text-foreground outline-none border ${
+            isDark
+              ? "bg-[rgba(255,255,255,0.04)] border-[rgba(255,255,255,0.1)] focus:border-[#EF4444]"
+              : "bg-[rgba(0,0,0,0.03)] border-[rgba(0,0,0,0.1)] focus:border-[#EF4444]"
+          }`}
+        />
+        {error && (
+          <p className="mt-3 font-mono text-xs text-[#EF4444]" data-testid="delete-account-error">
+            {error}
+          </p>
+        )}
+        <div className="mt-6 flex items-center gap-3 justify-end">
+          <button
+            type="button"
+            onClick={onClose}
+            disabled={busy}
+            data-testid="delete-account-cancel"
+            className={`font-mono text-sm px-4 py-2 rounded-lg transition-colors ${
+              isDark
+                ? "text-muted-foreground hover:bg-[rgba(255,255,255,0.04)]"
+                : "text-muted-foreground hover:bg-[rgba(0,0,0,0.04)]"
+            }`}
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={onConfirm}
+            disabled={!canDelete}
+            data-testid="delete-account-confirm"
+            className="font-mono text-sm px-4 py-2 rounded-lg bg-[#EF4444] text-white hover:bg-[#DC2626] disabled:opacity-40 disabled:cursor-not-allowed transition-colors flex items-center gap-2"
+          >
+            {busy && <Loader2 className="w-4 h-4 animate-spin" />}
+            Delete permanently
+          </button>
+        </div>
+      </motion.div>
+    </div>
+  );
+}
+
+// -------------------------- The page --------------------------
+
+const TIMEZONES = [
+  { value: "UTC", label: "UTC" },
+  { value: "America/New_York", label: "EST (New York)" },
+  { value: "America/Los_Angeles", label: "PST (Los Angeles)" },
+  { value: "America/Chicago", label: "CST (Chicago)" },
+  { value: "America/Denver", label: "MST (Denver)" },
+  { value: "Europe/London", label: "GMT (London)" },
+  { value: "Europe/Paris", label: "CET (Paris)" },
+  { value: "Europe/Berlin", label: "CET (Berlin)" },
+  { value: "Asia/Tokyo", label: "JST (Tokyo)" },
+  { value: "Asia/Singapore", label: "SGT (Singapore)" },
+  { value: "Asia/Kolkata", label: "IST (India)" },
+  { value: "Australia/Sydney", label: "AEDT (Sydney)" },
+];
+
 export default function SettingsPage() {
-  // Profile state
-  const [userName, setUserName] = useState("David Chen");
-  const [userEmail, setUserEmail] = useState("david@example.com");
-  const [timezone, setTimezone] = useState("America/New_York");
-
-  // Notification settings
-  const [pushEnabled, setPushEnabled] = useState(true);
-  const [emailEnabled, setEmailEnabled] = useState(true);
-  const [dailyReminder, setDailyReminder] = useState(true);
-  const [reminderTime, setReminderTime] = useState("08:00");
-  const [coachAlerts, setCoachAlerts] = useState(true);
-  const [soundEnabled, setSoundEnabled] = useState(false);
-
-  // AI Coach settings
-  const [coachingStyle, setCoachingStyle] = useState("balanced");
-  const [messageFrequency, setMessageFrequency] = useState("moderate");
-  const [proactiveCheckins, setProactiveCheckins] = useState(true);
-  const [celebrateMilestones, setCelebrateMilestones] = useState(true);
-
-  // Calendar settings
-  const [defaultView, setDefaultView] = useState("week");
-  const [workingHoursStart, setWorkingHoursStart] = useState("09:00");
-  const [workingHoursEnd, setWorkingHoursEnd] = useState("18:00");
-  const [weekStartsOn, setWeekStartsOn] = useState("monday");
-  const [showWeekends, setShowWeekends] = useState(true);
-
-  // Appearance - using global theme context
+  const router = useRouter();
+  const { user, refresh, logout } = useAuth();
   const { theme, setTheme } = useTheme();
   const isDark = theme === "dark";
-  const [reduceAnimations, setReduceAnimations] = useState(false);
-  const [compactMode, setCompactMode] = useState(false);
 
-  // Connected integrations
-  const [googleCalendarConnected, setGoogleCalendarConnected] = useState(true);
-  const [appleHealthConnected, setAppleHealthConnected] = useState(false);
+  const [prefs, setPrefs] = useState<ApiUserPreferences | null>(null);
+  const [goalContext, setGoalContext] = useState<ApiGoalContextItem[] | null>(
+    null,
+  );
+  const [loading, setLoading] = useState(true);
+  const [saveStatus, setSaveStatus] = useState<
+    "idle" | "saving" | "saved" | "error"
+  >("idle");
+  const [deleteOpen, setDeleteOpen] = useState(false);
+  const [deleteBusy, setDeleteBusy] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+
+  // Load prefs + goal context on mount.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const [p, gc] = await Promise.all([
+          api.get<ApiUserPreferences>("/api/users/me/preferences"),
+          api.get<{ goals: ApiGoalContextItem[] }>(
+            "/api/users/me/goal-context",
+          ),
+        ]);
+        if (cancelled) return;
+        setPrefs(p);
+        setGoalContext(gc.goals);
+      } catch {
+        // Silent — user can still use the page; errors surface on save.
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // Debounced save on every pref change (except the initial load).
+  useEffect(() => {
+    if (!prefs || loading) return;
+    setSaveStatus("saving");
+    const handle = setTimeout(async () => {
+      try {
+        const saved = await api.patch<ApiUserPreferences>(
+          "/api/users/me/preferences",
+          prefs,
+        );
+        setPrefs(saved);
+        setSaveStatus("saved");
+        // If display_name changed, auth context needs a refresh so the orb/sidebar update.
+        if (saved.display_name !== user?.name) {
+          void refresh();
+        }
+        setTimeout(() => setSaveStatus("idle"), 1500);
+      } catch {
+        setSaveStatus("error");
+      }
+    }, 500);
+    return () => clearTimeout(handle);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    prefs?.display_name,
+    prefs?.timezone,
+    prefs?.coaching_style,
+    prefs?.message_frequency,
+    prefs?.proactive_checkins,
+    prefs?.preferred_work_time,
+  ]);
+
+  const updatePref = <K extends keyof ApiUserPreferences>(
+    key: K,
+    value: ApiUserPreferences[K],
+  ) => {
+    setPrefs((prev) => (prev ? { ...prev, [key]: value } : prev));
+  };
+
+  const handleSignOut = async () => {
+    await logout();
+    setAuthToken(null);
+    router.replace("/login");
+  };
+
+  const handleConfirmDelete = async () => {
+    setDeleteBusy(true);
+    setDeleteError(null);
+    try {
+      await api.delete<{ ok: boolean; audit_id: string }>("/api/users/me", {
+        confirmation: "DELETE",
+      });
+      // Success — wipe local token and route to login.
+      setAuthToken(null);
+      router.replace("/login");
+    } catch (err) {
+      setDeleteError(
+        err instanceof ApiError
+          ? err.message
+          : err instanceof Error
+            ? err.message
+            : "Deletion failed",
+      );
+    } finally {
+      setDeleteBusy(false);
+    }
+  };
 
   return (
-    <div className="min-h-screen bg-background noise-bg transition-colors duration-300">
+    <div
+      className="min-h-screen bg-background noise-bg transition-colors duration-300"
+      data-testid="settings-page"
+    >
       <SidebarNav />
 
-      {/* Background effects */}
       <div className="fixed inset-0 pointer-events-none">
-        <div className={`absolute top-1/4 left-1/2 -translate-x-1/2 w-[600px] lg:w-[900px] h-[500px] lg:h-[700px] rounded-full blur-[100px] lg:blur-[150px] ${isDark ? "bg-[#F5C518]/[0.02]" : "bg-[#F5C518]/[0.04]"}`} />
+        <div
+          className={`absolute top-1/4 left-1/2 -translate-x-1/2 w-[600px] lg:w-[900px] h-[500px] lg:h-[700px] rounded-full blur-[100px] lg:blur-[150px] ${
+            isDark ? "bg-[#F5C518]/[0.02]" : "bg-[#F5C518]/[0.04]"
+          }`}
+        />
       </div>
 
       <main className="relative ml-0 md:ml-[72px] lg:ml-[240px] pt-16 md:pt-0 pb-24 md:pb-8 min-h-screen">
@@ -257,371 +497,344 @@ export default function SettingsPage() {
           <motion.div
             initial={{ opacity: 0, y: -10 }}
             animate={{ opacity: 1, y: 0 }}
-            className="mb-8 lg:mb-10"
+            className="mb-8 lg:mb-10 flex items-center justify-between"
           >
-            <h1 className="font-sans font-bold text-2xl sm:text-3xl lg:text-4xl text-foreground">
-              Settings
-            </h1>
-            <p className="font-mono text-sm lg:text-base text-muted-foreground mt-2">
-              Customize your MentorMeUp experience
-            </p>
+            <div>
+              <h1 className="font-sans font-bold text-2xl sm:text-3xl lg:text-4xl text-foreground">
+                Settings
+              </h1>
+              <p className="font-mono text-sm lg:text-base text-muted-foreground mt-2">
+                Customize your MentorMeUp experience. Changes save automatically.
+              </p>
+            </div>
+            {/* Save status pill */}
+            <div className="hidden sm:block" data-testid="settings-save-status">
+              {saveStatus === "saving" && (
+                <span className="font-mono text-xs text-muted-foreground flex items-center gap-1.5">
+                  <Loader2 className="w-3 h-3 animate-spin" /> Saving…
+                </span>
+              )}
+              {saveStatus === "saved" && (
+                <span className="font-mono text-xs text-[#22C55E] flex items-center gap-1.5">
+                  <Check className="w-3 h-3" /> Saved
+                </span>
+              )}
+              {saveStatus === "error" && (
+                <span className="font-mono text-xs text-[#EF4444] flex items-center gap-1.5">
+                  <AlertTriangle className="w-3 h-3" /> Save failed
+                </span>
+              )}
+            </div>
           </motion.div>
 
-          {/* Two column layout on large screens */}
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 lg:gap-8">
             {/* Left Column */}
             <div className="space-y-6">
-              {/* Profile Section */}
-              <SettingsSection icon={User} title="Profile" delay={0.1}>
-              <div className={`flex items-center gap-4 pb-4 border-b ${isDark ? "border-[rgba(255,255,255,0.04)]" : "border-[rgba(0,0,0,0.06)]"}`}>
-                <div className="w-16 h-16 rounded-full bg-gradient-to-br from-[#F5C518] to-[#00D4FF] flex items-center justify-center text-xl font-bold text-[#080B14]">
-                  {userName.charAt(0)}
+              {/* Profile */}
+              <SettingsSection
+                icon={User}
+                title="Profile"
+                delay={0.1}
+                testId="settings-section-profile"
+              >
+                <div
+                  className={`flex items-center gap-4 pb-4 border-b ${
+                    isDark ? "border-[rgba(255,255,255,0.04)]" : "border-[rgba(0,0,0,0.06)]"
+                  }`}
+                >
+                  <div className="w-16 h-16 rounded-full bg-gradient-to-br from-[#F5C518] to-[#00D4FF] flex items-center justify-center text-xl font-bold text-[#080B14]">
+                    {(prefs?.display_name || user?.name || "?").charAt(0)}
+                  </div>
+                  <div className="flex-1">
+                    <input
+                      type="text"
+                      value={prefs?.display_name ?? ""}
+                      onChange={(e) => updatePref("display_name", e.target.value)}
+                      placeholder="Your name"
+                      data-testid="settings-display-name"
+                      className="bg-transparent font-sans font-semibold text-foreground text-lg outline-none w-full"
+                    />
+                    <p className="bg-transparent font-mono text-sm text-muted-foreground w-full mt-0.5">
+                      {user?.email ?? "—"}
+                    </p>
+                  </div>
                 </div>
-                <div className="flex-1">
-                  <input
-                    type="text"
-                    value={userName}
-                    onChange={(e) => setUserName(e.target.value)}
-                    className="bg-transparent font-sans font-semibold text-foreground text-lg outline-none w-full"
-                  />
-                  <input
-                    type="email"
-                    value={userEmail}
-                    onChange={(e) => setUserEmail(e.target.value)}
-                    className="bg-transparent font-mono text-sm text-muted-foreground outline-none w-full mt-0.5"
-                  />
-                </div>
-              </div>
 
-              <SettingsRow label="Timezone" isDark={isDark}>
-                <SelectDropdown
-                  value={timezone}
-                  onChange={setTimezone}
-                  isDark={isDark}
-                  options={[
-                    { value: "America/New_York", label: "EST (New York)" },
-                    { value: "America/Los_Angeles", label: "PST (Los Angeles)" },
-                    { value: "America/Chicago", label: "CST (Chicago)" },
-                    { value: "Europe/London", label: "GMT (London)" },
-                    { value: "Europe/Paris", label: "CET (Paris)" },
-                    { value: "Asia/Tokyo", label: "JST (Tokyo)" },
-                    { value: "Asia/Singapore", label: "SGT (Singapore)" },
-                  ]}
-                />
-              </SettingsRow>
-
-              <SettingsRow label="Current Goal" isDark={isDark}>
-                <span className="font-mono text-xs text-[#F5C518] bg-[rgba(245,197,24,0.12)] px-3 py-1 rounded-full">
-                  Lose 15kg
-                </span>
-              </SettingsRow>
-            </SettingsSection>
-
-            {/* Notifications Section */}
-            <SettingsSection icon={Bell} title="Notifications" delay={0.15}>
-              <SettingsRow
-                label="Push Notifications"
-                description="Get notified on your device"
-                isDark={isDark}
-              >
-                <ToggleSwitch enabled={pushEnabled} onToggle={() => setPushEnabled(!pushEnabled)} isDark={isDark} />
-              </SettingsRow>
-
-              <SettingsRow
-                label="Email Notifications"
-                description="Weekly progress summaries"
-                isDark={isDark}
-              >
-                <ToggleSwitch enabled={emailEnabled} onToggle={() => setEmailEnabled(!emailEnabled)} isDark={isDark} />
-              </SettingsRow>
-
-              <SettingsRow
-                label="Daily Reminder"
-                description="Morning check-in reminder"
-                isDark={isDark}
-              >
-                <ToggleSwitch enabled={dailyReminder} onToggle={() => setDailyReminder(!dailyReminder)} isDark={isDark} />
-              </SettingsRow>
-
-              {dailyReminder && (
-                <SettingsRow label="Reminder Time" isDark={isDark}>
-                  <input
-                    type="time"
-                    value={reminderTime}
-                    onChange={(e) => setReminderTime(e.target.value)}
-                    className={`rounded-lg px-3 py-1.5 font-mono text-xs text-foreground outline-none focus:border-[#F5C518] transition-colors ${isDark ? "bg-[rgba(255,255,255,0.06)] border border-[rgba(255,255,255,0.08)]" : "bg-[rgba(0,0,0,0.04)] border border-[rgba(0,0,0,0.08)]"}`}
+                <SettingsRow label="Timezone" isDark={isDark}>
+                  <SelectDropdown
+                    value={prefs?.timezone ?? "UTC"}
+                    onChange={(v) => updatePref("timezone", v)}
+                    isDark={isDark}
+                    options={TIMEZONES}
+                    testId="settings-timezone"
                   />
                 </SettingsRow>
-              )}
+              </SettingsSection>
 
-              <SettingsRow
-                label="Coach Message Alerts"
-                description="When your AI coach sends a message"
-                isDark={isDark}
+              {/* AI Coach */}
+              <SettingsSection
+                icon={Brain}
+                title="AI Coach"
+                delay={0.15}
+                testId="settings-section-coach"
               >
-                <ToggleSwitch enabled={coachAlerts} onToggle={() => setCoachAlerts(!coachAlerts)} isDark={isDark} />
-              </SettingsRow>
-
-              <SettingsRow
-                label="Sound Effects"
-                description="Task completion sounds"
-                isDark={isDark}
-              >
-                <ToggleSwitch enabled={soundEnabled} onToggle={() => setSoundEnabled(!soundEnabled)} isDark={isDark} />
-              </SettingsRow>
-            </SettingsSection>
-
-            {/* AI Coach Section */}
-            <SettingsSection icon={Brain} title="AI Coach" delay={0.2}>
-              <SettingsRow
-                label="Coaching Style"
-                description="How your coach communicates"
-                isDark={isDark}
-              >
-                <SelectDropdown
-                  value={coachingStyle}
-                  onChange={setCoachingStyle}
+                <SettingsRow
+                  label="Coaching Style"
+                  description="How your coach communicates"
                   isDark={isDark}
-                  options={[
-                    { value: "encouraging", label: "Encouraging" },
-                    { value: "balanced", label: "Balanced" },
-                    { value: "direct", label: "Direct" },
-                    { value: "tough", label: "Tough Love" },
-                  ]}
-                />
-              </SettingsRow>
+                >
+                  <SelectDropdown
+                    value={prefs?.coaching_style ?? "balanced"}
+                    onChange={(v) =>
+                      updatePref("coaching_style", v as CoachingStyle)
+                    }
+                    isDark={isDark}
+                    options={[
+                      { value: "gentle", label: "Gentle" },
+                      { value: "balanced", label: "Balanced" },
+                      { value: "direct", label: "Direct" },
+                      { value: "tough", label: "Tough Love" },
+                    ]}
+                    testId="settings-coaching-style"
+                  />
+                </SettingsRow>
 
-              <SettingsRow
-                label="Message Frequency"
-                description="How often coach reaches out"
-                isDark={isDark}
-              >
-                <SelectDropdown
-                  value={messageFrequency}
-                  onChange={setMessageFrequency}
+                <SettingsRow
+                  label="Message Frequency"
+                  description="How often coach reaches out"
                   isDark={isDark}
-                  options={[
-                    { value: "minimal", label: "Minimal" },
-                    { value: "moderate", label: "Moderate" },
-                    { value: "frequent", label: "Frequent" },
-                  ]}
-                />
-              </SettingsRow>
+                >
+                  <SelectDropdown
+                    value={prefs?.message_frequency ?? "moderate"}
+                    onChange={(v) =>
+                      updatePref("message_frequency", v as MessageFrequency)
+                    }
+                    isDark={isDark}
+                    options={[
+                      { value: "minimal", label: "Minimal" },
+                      { value: "moderate", label: "Moderate" },
+                      { value: "frequent", label: "Frequent" },
+                    ]}
+                    testId="settings-message-frequency"
+                  />
+                </SettingsRow>
 
-              <SettingsRow
-                label="Proactive Check-ins"
-                description="Coach initiates conversations"
-                isDark={isDark}
-              >
-                <ToggleSwitch enabled={proactiveCheckins} onToggle={() => setProactiveCheckins(!proactiveCheckins)} isDark={isDark} />
-              </SettingsRow>
+                <SettingsRow
+                  label="Preferred Work Time"
+                  description="When you do your best deep work"
+                  isDark={isDark}
+                >
+                  <SelectDropdown
+                    value={prefs?.preferred_work_time ?? "flexible"}
+                    onChange={(v) =>
+                      updatePref("preferred_work_time", v as PreferredWorkTime)
+                    }
+                    isDark={isDark}
+                    options={[
+                      { value: "morning", label: "Morning" },
+                      { value: "afternoon", label: "Afternoon" },
+                      { value: "evening", label: "Evening" },
+                      { value: "flexible", label: "Flexible" },
+                    ]}
+                    testId="settings-preferred-work-time"
+                  />
+                </SettingsRow>
 
-              <SettingsRow
-                label="Celebrate Milestones"
-                description="Special messages for achievements"
-                isDark={isDark}
-              >
-                <ToggleSwitch enabled={celebrateMilestones} onToggle={() => setCelebrateMilestones(!celebrateMilestones)} isDark={isDark} />
-              </SettingsRow>
-            </SettingsSection>
+                <SettingsRow
+                  label="Proactive Check-ins"
+                  description="Coach initiates conversations (evening nudges, struggle detection)"
+                  isDark={isDark}
+                >
+                  <ToggleSwitch
+                    enabled={prefs?.proactive_checkins ?? true}
+                    onToggle={() =>
+                      updatePref(
+                        "proactive_checkins",
+                        !(prefs?.proactive_checkins ?? true),
+                      )
+                    }
+                    isDark={isDark}
+                    testId="settings-proactive-checkins"
+                  />
+                </SettingsRow>
+              </SettingsSection>
             </div>
 
             {/* Right Column */}
             <div className="space-y-6">
-              {/* Calendar Section */}
-              <SettingsSection icon={Calendar} title="Calendar" delay={0.25}>
-              <SettingsRow label="Default View" isDark={isDark}>
-                <SelectDropdown
-                  value={defaultView}
-                  onChange={setDefaultView}
-                  isDark={isDark}
-                  options={[
-                    { value: "day", label: "Day" },
-                    { value: "week", label: "Week" },
-                    { value: "month", label: "Month" },
-                  ]}
-                />
-              </SettingsRow>
-
-              <SettingsRow label="Week Starts On" isDark={isDark}>
-                <SelectDropdown
-                  value={weekStartsOn}
-                  onChange={setWeekStartsOn}
-                  isDark={isDark}
-                  options={[
-                    { value: "sunday", label: "Sunday" },
-                    { value: "monday", label: "Monday" },
-                  ]}
-                />
-              </SettingsRow>
-
-              <SettingsRow label="Working Hours" isDark={isDark}>
-                <div className="flex items-center gap-2">
-                  <input
-                    type="time"
-                    value={workingHoursStart}
-                    onChange={(e) => setWorkingHoursStart(e.target.value)}
-                    className={`rounded-lg px-2 py-1 font-mono text-xs text-foreground outline-none focus:border-[#F5C518] transition-colors w-20 ${isDark ? "bg-[rgba(255,255,255,0.06)] border border-[rgba(255,255,255,0.08)]" : "bg-[rgba(0,0,0,0.04)] border border-[rgba(0,0,0,0.08)]"}`}
-                  />
-                  <span className="text-muted-foreground text-xs">to</span>
-                  <input
-                    type="time"
-                    value={workingHoursEnd}
-                    onChange={(e) => setWorkingHoursEnd(e.target.value)}
-                    className={`rounded-lg px-2 py-1 font-mono text-xs text-foreground outline-none focus:border-[#F5C518] transition-colors w-20 ${isDark ? "bg-[rgba(255,255,255,0.06)] border border-[rgba(255,255,255,0.08)]" : "bg-[rgba(0,0,0,0.04)] border border-[rgba(0,0,0,0.08)]"}`}
-                  />
-                </div>
-              </SettingsRow>
-
-              <SettingsRow label="Show Weekends" isDark={isDark}>
-                <ToggleSwitch enabled={showWeekends} onToggle={() => setShowWeekends(!showWeekends)} isDark={isDark} />
-              </SettingsRow>
-            </SettingsSection>
-
-            {/* Appearance Section */}
-            <SettingsSection icon={Palette} title="Appearance" delay={0.3}>
-              <SettingsRow label="Theme" isDark={isDark}>
-                <div className="flex items-center gap-2">
-                  <button
-                    onClick={() => setTheme("dark")}
-                    className={`p-2 rounded-lg transition-all ${
-                      theme === "dark"
-                        ? "bg-[#F5C518] text-[#080B14]"
-                        : isDark ? "bg-[rgba(255,255,255,0.06)] text-muted-foreground" : "bg-[rgba(0,0,0,0.06)] text-muted-foreground"
-                    }`}
-                  >
-                    <Moon className="w-4 h-4" />
-                  </button>
-                  <button
-                    onClick={() => setTheme("light")}
-                    className={`p-2 rounded-lg transition-all ${
-                      theme === "light"
-                        ? "bg-[#F5C518] text-[#080B14]"
-                        : isDark ? "bg-[rgba(255,255,255,0.06)] text-muted-foreground" : "bg-[rgba(0,0,0,0.06)] text-muted-foreground"
-                    }`}
-                  >
-                    <Sun className="w-4 h-4" />
-                  </button>
-                </div>
-              </SettingsRow>
-
-              <SettingsRow
-                label="Reduce Animations"
-                description="For motion sensitivity"
-                isDark={isDark}
+              {/* Your goal context (read-only) */}
+              <SettingsSection
+                icon={Target}
+                title="Your Goal Context"
+                delay={0.2}
+                testId="settings-section-goal-context"
               >
-                <ToggleSwitch enabled={reduceAnimations} onToggle={() => setReduceAnimations(!reduceAnimations)} isDark={isDark} />
-              </SettingsRow>
+                <p className="font-mono text-xs text-muted-foreground mb-2">
+                  What the coach knows about you. Read-only for now — if
+                  anything here is wrong, tell your coach and ask them to
+                  update it.
+                </p>
+                {loading && (
+                  <p className="font-mono text-xs text-muted-foreground">
+                    Loading…
+                  </p>
+                )}
+                {!loading && goalContext && goalContext.length === 0 && (
+                  <p className="font-mono text-xs text-muted-foreground">
+                    No goals yet. Create one from the home screen to start
+                    building your context.
+                  </p>
+                )}
+                {!loading &&
+                  goalContext &&
+                  goalContext.map((g) => (
+                    <div
+                      key={g.goal_id}
+                      data-testid={`goal-context-${g.goal_id}`}
+                      className={`rounded-xl p-3 ${
+                        isDark
+                          ? "bg-[rgba(255,255,255,0.02)] border border-[rgba(255,255,255,0.04)]"
+                          : "bg-[rgba(0,0,0,0.02)] border border-[rgba(0,0,0,0.04)]"
+                      }`}
+                    >
+                      <div className="flex items-center justify-between mb-2">
+                        <p className="font-sans font-semibold text-sm text-foreground">
+                          {g.title}
+                        </p>
+                        <span
+                          className={`font-mono text-[10px] px-2 py-0.5 rounded-full ${
+                            g.intake_status === "complete"
+                              ? "text-[#22C55E] bg-[rgba(34,197,94,0.1)]"
+                              : g.intake_status === "in_progress" ||
+                                  g.intake_status === "building_path"
+                                ? "text-[#F5C518] bg-[rgba(245,197,24,0.1)]"
+                                : "text-muted-foreground bg-[rgba(255,255,255,0.04)]"
+                          }`}
+                        >
+                          {g.intake_status.replace("_", " ")}
+                        </span>
+                      </div>
+                      {g.user_answers.length === 0 ? (
+                        <p className="font-mono text-[11px] text-muted-foreground italic">
+                          Intake not started yet.
+                        </p>
+                      ) : (
+                        <ul className="space-y-1.5">
+                          {g.user_answers.map((a, i) => (
+                            <li
+                              key={i}
+                              className="flex gap-2 font-mono text-[11px] leading-relaxed"
+                            >
+                              <FileText className="w-3 h-3 text-[#00D4FF] flex-shrink-0 mt-0.5" />
+                              <span
+                                className={
+                                  isDark
+                                    ? "text-[rgba(255,255,255,0.7)]"
+                                    : "text-[rgba(0,0,0,0.7)]"
+                                }
+                              >
+                                {a.content}
+                              </span>
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                    </div>
+                  ))}
+              </SettingsSection>
 
-              <SettingsRow
-                label="Compact Mode"
-                description="Denser UI layout"
-                isDark={isDark}
+              {/* Appearance */}
+              <SettingsSection
+                icon={Palette}
+                title="Appearance"
+                delay={0.25}
+                testId="settings-section-appearance"
               >
-                <ToggleSwitch enabled={compactMode} onToggle={() => setCompactMode(!compactMode)} isDark={isDark} />
-              </SettingsRow>
-            </SettingsSection>
-
-            {/* Integrations Section */}
-            <SettingsSection icon={Link2} title="Integrations" delay={0.35}>
-              <div className="space-y-2">
-                <div className={`flex items-center justify-between p-3 rounded-xl ${isDark ? "bg-[rgba(255,255,255,0.02)]" : "bg-[rgba(0,0,0,0.02)]"}`}>
-                  <div className="flex items-center gap-3">
-                    <div className="w-9 h-9 rounded-lg bg-white flex items-center justify-center">
-                      <svg viewBox="0 0 24 24" className="w-5 h-5">
-                        <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/>
-                        <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/>
-                        <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z"/>
-                        <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/>
-                      </svg>
-                    </div>
-                    <div>
-                      <p className="font-mono text-sm text-foreground">Google Calendar</p>
-                      <p className="font-mono text-xs text-muted-foreground">
-                        {googleCalendarConnected ? "Connected" : "Not connected"}
-                      </p>
-                    </div>
+                <SettingsRow label="Theme" isDark={isDark}>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setTheme("dark")}
+                      data-testid="settings-theme-dark"
+                      className={`p-2 rounded-lg transition-all ${
+                        theme === "dark"
+                          ? "bg-[#F5C518] text-[#080B14]"
+                          : isDark
+                            ? "bg-[rgba(255,255,255,0.06)] text-muted-foreground"
+                            : "bg-[rgba(0,0,0,0.06)] text-muted-foreground"
+                      }`}
+                    >
+                      <Moon className="w-4 h-4" />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setTheme("light")}
+                      data-testid="settings-theme-light"
+                      className={`p-2 rounded-lg transition-all ${
+                        theme === "light"
+                          ? "bg-[#F5C518] text-[#080B14]"
+                          : isDark
+                            ? "bg-[rgba(255,255,255,0.06)] text-muted-foreground"
+                            : "bg-[rgba(0,0,0,0.06)] text-muted-foreground"
+                      }`}
+                    >
+                      <Sun className="w-4 h-4" />
+                    </button>
                   </div>
-                  {googleCalendarConnected ? (
-                    <button
-                      onClick={() => setGoogleCalendarConnected(false)}
-                      className="font-mono text-xs text-[#EF4444] hover:underline"
-                    >
-                      Disconnect
-                    </button>
-                  ) : (
-                    <button
-                      onClick={() => setGoogleCalendarConnected(true)}
-                      className="font-mono text-xs text-[#F5C518] hover:underline"
-                    >
-                      Connect
-                    </button>
-                  )}
-                </div>
+                </SettingsRow>
+              </SettingsSection>
 
-                <div className={`flex items-center justify-between p-3 rounded-xl ${isDark ? "bg-[rgba(255,255,255,0.02)]" : "bg-[rgba(0,0,0,0.02)]"}`}>
-                  <div className="flex items-center gap-3">
-                    <div className="w-9 h-9 rounded-lg bg-gradient-to-br from-[#FF3B30] to-[#FF6B6B] flex items-center justify-center">
-                      <svg viewBox="0 0 24 24" className="w-5 h-5 text-white" fill="currentColor">
-                        <path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/>
-                      </svg>
-                    </div>
-                    <div>
-                      <p className="font-mono text-sm text-foreground">Apple Health</p>
-                      <p className="font-mono text-xs text-muted-foreground">
-                        {appleHealthConnected ? "Connected" : "Not connected"}
-                      </p>
-                    </div>
-                  </div>
-                  {appleHealthConnected ? (
-                    <button
-                      onClick={() => setAppleHealthConnected(false)}
-                      className="font-mono text-xs text-[#EF4444] hover:underline"
-                    >
-                      Disconnect
-                    </button>
-                  ) : (
-                    <button
-                      onClick={() => setAppleHealthConnected(true)}
-                      className="font-mono text-xs text-[#F5C518] hover:underline"
-                    >
-                      Connect
-                    </button>
-                  )}
+              {/* Data & Privacy */}
+              <SettingsSection
+                icon={Download}
+                title="Data & Privacy"
+                delay={0.3}
+                testId="settings-section-data"
+              >
+                <div className="space-y-1">
+                  <ClickableRow
+                    icon={Download}
+                    label="Export My Data"
+                    description="Coming soon"
+                    onClick={() => {}}
+                    disabled
+                    isDark={isDark}
+                    testId="settings-export-data"
+                  />
+                  <ClickableRow
+                    icon={LogOut}
+                    label="Sign Out"
+                    onClick={() => void handleSignOut()}
+                    isDark={isDark}
+                    testId="settings-sign-out"
+                  />
+                  <ClickableRow
+                    icon={Trash2}
+                    label="Delete Account"
+                    description="Permanently delete all data"
+                    onClick={() => {
+                      setDeleteError(null);
+                      setDeleteOpen(true);
+                    }}
+                    danger
+                    isDark={isDark}
+                    testId="settings-delete-account"
+                  />
                 </div>
-              </div>
-            </SettingsSection>
-
-            {/* Data & Privacy Section */}
-            <SettingsSection icon={Download} title="Data & Privacy" delay={0.4}>
-              <div className="space-y-1">
-                <ClickableRow
-                  icon={Download}
-                  label="Export My Data"
-                  description="Download all your goals and progress"
-                  onClick={() => alert("Exporting data...")}
-                  isDark={isDark}
-                />
-                <ClickableRow
-                  icon={Trash2}
-                  label="Delete Account"
-                  description="Permanently delete all data"
-                  onClick={() => alert("Are you sure?")}
-                  danger
-                  isDark={isDark}
-                />
-                <ClickableRow
-                  icon={LogOut}
-                  label="Sign Out"
-                  onClick={() => alert("Signing out...")}
-                  isDark={isDark}
-                />
-              </div>
-            </SettingsSection>
+              </SettingsSection>
             </div>
           </div>
         </div>
       </main>
+
+      <DeleteAccountModal
+        open={deleteOpen}
+        onClose={() => setDeleteOpen(false)}
+        onConfirm={() => void handleConfirmDelete()}
+        isDark={isDark}
+        busy={deleteBusy}
+        error={deleteError}
+      />
     </div>
   );
 }

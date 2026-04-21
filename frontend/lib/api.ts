@@ -75,7 +75,7 @@ export const api = {
   get: <T>(path: string) => request<T>("GET", path),
   post: <T>(path: string, body?: unknown) => request<T>("POST", path, body),
   patch: <T>(path: string, body?: unknown) => request<T>("PATCH", path, body),
-  delete: <T>(path: string) => request<T>("DELETE", path),
+  delete: <T>(path: string, body?: unknown) => request<T>("DELETE", path, body),
 };
 
 // ---------- Types shared with backend ----------
@@ -141,4 +141,26 @@ export interface ApiActivityEvent {
   summary: string;
   payload: Record<string, unknown>;
   created_at: string;
+}
+
+export type CoachingStyle = "gentle" | "balanced" | "direct" | "tough";
+export type MessageFrequency = "minimal" | "moderate" | "frequent";
+export type PreferredWorkTime = "morning" | "afternoon" | "evening" | "flexible";
+
+export interface ApiUserPreferences {
+  display_name: string;
+  timezone: string;
+  coaching_style: CoachingStyle;
+  message_frequency: MessageFrequency;
+  proactive_checkins: boolean;
+  preferred_work_time: PreferredWorkTime;
+}
+
+export interface ApiGoalContextItem {
+  goal_id: string;
+  title: string;
+  status: string;
+  intake_status: string;
+  created_at: string;
+  user_answers: { content: string; created_at: string }[];
 }

@@ -66,6 +66,49 @@ MongoDB: users, user_sessions, user_state, goals, paths, chat_messages,
   to 12 MB and stalling React hydration behind the AuthGate Loading
   screen. `yarn dev` still available for live hot-reload sessions.
 
+### Session 8 — Settings/Preferences + Struggle detection
+- **`GET/PATCH /api/users/me/preferences`** — new `user_preferences` collection
+  stores `display_name`, `timezone`, `coaching_style` (gentle/balanced/direct/
+  tough), `message_frequency` (minimal/moderate/frequent),
+  `proactive_checkins` (bool), `preferred_work_time` (morning/afternoon/
+  evening/flexible). Display-name edits also mirror to `users.name` so the
+  orb greeting and AuthContext pick it up.
+- **Coach system prompt injection** — `COACH_SYSTEM_PROMPT` grew two new
+  blocks (`PERSONAL TONE OVERRIDE` + `SCHEDULING PREFERENCE`) that are filled
+  from `user_preferences` on every `POST /api/coach/chat`. Verified via the
+  new `GET /api/coach/_debug/system-prompt` endpoint and by sending the same
+  provocative user message under tough-vs-gentle: Claude's reply genuinely
+  shifts tone ("Stop there. 'Restart next week' is the trap" → "That's the
+  exhaustion talking, not the real you").
+- **`GET /api/users/me/goal-context`** — returns each goal's intake user-
+  answers so the Settings page can render a read-only "Your Goal Context"
+  card. This is the trust-builder: users can see what the coach knows.
+- **`DELETE /api/users/me`** — requires `{"confirmation":"DELETE"}` (exact
+  casing). Writes an `account_deletion_audit` row FIRST (with per-collection
+  counts), then cascades in the exact order requested: activity_events →
+  notes → calendar_events → paths → goals → intake_messages → chat_messages
+  → user_state → user_preferences → user_sessions → users. Verified: wrong
+  casing → 400, correct casing → cascading delete + audit entry.
+- **`/settings` page fully wired** — display-name input, timezone picker,
+  coaching-style + message-frequency + preferred-work-time dropdowns,
+  proactive-checkins toggle all read from and debounce-save to the new
+  endpoints. "Your Goal Context" card shows intake answers per goal. Sign
+  Out calls real logout. "Export My Data" stays disabled/"Coming soon".
+  Delete button opens a modal requiring the typed literal "DELETE".
+- **Struggle detection shipped**: `_process_struggle_for_user` +
+  `run_struggle_detection` + `POST /api/coach/struggle-detection/run` +
+  new background loop that runs every 15 minutes. Triggers when a user's
+  next incomplete micro-task has been `task.viewed` 3+ times in the last
+  24 hours with no `task.completed`. Writes a specific Claude nudge
+  (e.g. *"I noticed you've opened 'Write 500 words of chapter 3' three
+  times today without getting started — what's actually happening when you
+  sit down to do it?"*) as a `chat_messages` doc with `kind:
+  "struggle_nudge"`. Idempotent per-user-per-task-per-24h via
+  `user_state.struggle_nudges`. Honors `proactive_checkins: false`. All
+  five guard cases verified.
+- Frontend: `api.delete` now accepts a body (needed for typed-DELETE
+  confirmation payload).
+
 ## What's Been Implemented
 
 ### Sessions 1–4 — Foundation
