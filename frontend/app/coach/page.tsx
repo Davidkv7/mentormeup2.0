@@ -1,107 +1,70 @@
 "use client";
 
-import { useState, useRef, useEffect } from "react";
+import { useRef, useEffect, useState } from "react";
 import { motion } from "motion/react";
-import { Mic, ArrowUp, Info, Calendar, Target } from "lucide-react";
+import { ArrowUp, Calendar, Target, Sparkles } from "lucide-react";
 import Link from "next/link";
 import { SidebarNav } from "@/components/sidebar-nav";
 import { AnimatedOrb } from "@/components/animated-orb";
 import { QuickReplyChips } from "@/components/quick-reply-chips";
 import { useTheme } from "@/contexts/theme-context";
-
-interface Message {
-  id: string;
-  role: "ai" | "user";
-  content: string;
-  timestamp: string;
-}
-
-const initialMessages: Message[] = [
-  {
-    id: "1",
-    role: "ai",
-    content:
-      "I noticed something. You've opened the 'Write your offer' task three times this week. Each time, you closed it within 2 minutes. That's not procrastination — that's avoidance of something specific. What happens when you sit down to write it?",
-    timestamp: "9:14 AM",
-  },
-  {
-    id: "2",
-    role: "user",
-    content:
-      "Honestly? I freeze. I don't know how to sound professional without sounding generic. And I'm scared I'll undersell myself.",
-    timestamp: "9:16 AM",
-  },
-  {
-    id: "3",
-    role: "ai",
-    content:
-      "That's the block. You're trying to write for an imaginary 'professional' audience instead of one real person. Let's do a roleplay. I'll be a potential client — a startup founder who needs a landing page redesigned. You pitch me in 2-3 sentences. Don't overthink it. Just talk to me like a human.",
-    timestamp: "9:17 AM",
-  },
-  {
-    id: "4",
-    role: "user",
-    content:
-      "Okay... Hi! I help startups turn cluttered landing pages into clear, high-converting designs. I've worked with 3 early-stage companies this year and helped one increase signups by 40%. I'd love to take a look at yours and share some quick ideas.",
-    timestamp: "9:19 AM",
-  },
-  {
-    id: "5",
-    role: "ai",
-    content:
-      "That's your offer. Clear, specific, backed by a result. You didn't sound generic — you sounded like someone who knows what they do. Copy that message, paste it into your offer doc, and polish it. That's your starting point. Save it.",
-    timestamp: "9:20 AM",
-  },
-];
+import { useCoach } from "@/contexts/coach-context";
+import { useGoals } from "@/contexts/goals-context";
 
 const quickReplies = [
   "I'm struggling",
-  "Mark task done",
-  "Reschedule today",
+  "What should I focus on today?",
+  "Reschedule today's task",
 ];
 
+function formatTimestamp(iso: string): string {
+  try {
+    return new Date(iso).toLocaleTimeString("en-US", {
+      hour: "numeric",
+      minute: "2-digit",
+      hour12: true,
+    });
+  } catch {
+    return "";
+  }
+}
+
 export default function CoachChatPage() {
-  const [messages, setMessages] = useState<Message[]>(initialMessages);
+  const { messages, sending, sendMessage } = useCoach();
+  const { activeGoal } = useGoals();
   const [inputValue, setInputValue] = useState("");
-  const [showChips, setShowChips] = useState(true);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const { theme } = useTheme();
   const isDark = theme === "dark";
 
+  // Hide chips after the first user message.
+  const showChips = messages.filter((m) => m.role === "user").length === 0;
+
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages]);
+  }, [messages, sending]);
 
-  const handleSend = (content: string) => {
-    if (!content.trim()) return;
-
-    const newMessage: Message = {
-      id: Date.now().toString(),
-      role: "user",
-      content: content.trim(),
-      timestamp: new Date().toLocaleTimeString("en-US", {
-        hour: "numeric",
-        minute: "2-digit",
-        hour12: true,
-      }),
-    };
-
-    setMessages((prev) => [...prev, newMessage]);
+  const handleSend = async (content: string) => {
+    const trimmed = content.trim();
+    if (!trimmed || sending) return;
     setInputValue("");
-    setShowChips(false);
-  };
-
-  const handleChipSelect = (chip: string) => {
-    handleSend(chip);
+    await sendMessage(trimmed);
   };
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    handleSend(inputValue);
+    void handleSend(inputValue);
   };
 
+  // Pull today's phase + next incomplete micro-task hints out of the active goal.
+  const currentPhaseLabel = activeGoal
+    ? (activeGoal.phases[activeGoal.currentPhase]?.title ??
+      `Phase ${activeGoal.currentPhase + 1}`)
+    : null;
+  const todaysTasks = activeGoal?.dailyTasks ?? [];
+
   return (
-    <div className="min-h-screen bg-background noise-bg transition-colors duration-300">
+    <div className="min-h-screen bg-background noise-bg transition-colors duration-300" data-testid="coach-page">
       <SidebarNav />
 
       {/* Main Content */}
@@ -134,8 +97,10 @@ export default function CoachChatPage() {
                     <span className="relative inline-flex rounded-full h-full w-full bg-[#F5C518] shadow-[0_0_8px_rgba(245,197,24,0.6)]" />
                   </span>
                 </div>
-                <p className="font-mono text-xs text-[#00D4FF]">
-                  Full context: Freelancing Goal — Phase 2
+                <p className="font-mono text-xs text-[#00D4FF]" data-testid="coach-context-line">
+                  {activeGoal
+                    ? `${activeGoal.title}${currentPhaseLabel ? ` — ${currentPhaseLabel}` : ""}`
+                    : "Claude Sonnet 4.6 · knows your goals"}
                 </p>
               </div>
             </div>
@@ -148,80 +113,163 @@ export default function CoachChatPage() {
               <span className="relative inline-flex rounded-full h-full w-full bg-[#F5C518]" />
             </span>
             <p className="font-mono text-[10px] text-[#00D4FF]">
-              Freelancing Goal — Phase 2
+              {activeGoal
+                ? `${activeGoal.title}${currentPhaseLabel ? ` — ${currentPhaseLabel}` : ""}`
+                : "Your Coach"}
             </p>
           </div>
 
           {/* Chat Messages */}
-          <div className="flex-1 overflow-y-auto px-4 sm:px-6 lg:px-8 py-6 pb-48 lg:pb-40">
+          <div className="flex-1 overflow-y-auto px-4 sm:px-6 lg:px-8 py-6 pb-48 lg:pb-40" data-testid="coach-page-messages">
             <div className="max-w-3xl mx-auto space-y-6">
-              {messages.map((message, index) => (
+              {messages.length === 0 && (
                 <motion.div
-                  key={message.id}
-                  initial={{
-                    opacity: 0,
-                    x: message.role === "ai" ? -20 : 20,
-                    y: 10,
-                  }}
-                  animate={{ opacity: 1, x: 0, y: 0 }}
-                  transition={{ duration: 0.5, delay: index * 0.08, ease: [0.25, 0.4, 0.25, 1] }}
-                  className={`flex gap-3 lg:gap-4 ${
-                    message.role === "user" ? "justify-end" : "justify-start"
-                  }`}
+                  initial={{ opacity: 0, y: 10 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  transition={{ duration: 0.5, ease: [0.25, 0.4, 0.25, 1] }}
+                  className="flex gap-3 lg:gap-4 justify-start"
                 >
-                  {message.role === "ai" && (
-                    <div className="flex-shrink-0 mt-1 hidden sm:block">
-                      <AnimatedOrb size={36} />
-                    </div>
-                  )}
-
-                  <div
-                    className={`max-w-[85%] sm:max-w-[80%] lg:max-w-[75%] ${
-                      message.role === "user" ? "order-first" : ""
-                    }`}
-                  >
+                  <div className="flex-shrink-0 mt-1 hidden sm:block">
+                    <AnimatedOrb size={36} />
+                  </div>
+                  <div className="max-w-[85%] sm:max-w-[80%] lg:max-w-[75%]">
                     <div
-                      className={`rounded-2xl p-4 lg:p-5 ${
-                        message.role === "ai"
-                          ? "rounded-bl-md"
-                          : "rounded-br-md"
-                      }`}
+                      className="rounded-2xl rounded-bl-md p-4 lg:p-5"
                       style={{
-                        background: message.role === "ai"
-                          ? isDark 
-                            ? 'linear-gradient(135deg, rgba(255, 255, 255, 0.05) 0%, rgba(255, 255, 255, 0.02) 100%)'
-                            : 'linear-gradient(135deg, rgba(255, 255, 255, 0.9) 0%, rgba(255, 255, 255, 0.7) 100%)'
-                          : isDark
-                            ? 'linear-gradient(135deg, rgba(245, 197, 24, 0.12) 0%, rgba(245, 197, 24, 0.04) 100%)'
-                            : 'linear-gradient(135deg, rgba(245, 197, 24, 0.2) 0%, rgba(245, 197, 24, 0.08) 100%)',
+                        background: isDark
+                          ? 'linear-gradient(135deg, rgba(255, 255, 255, 0.05) 0%, rgba(255, 255, 255, 0.02) 100%)'
+                          : 'linear-gradient(135deg, rgba(255, 255, 255, 0.9) 0%, rgba(255, 255, 255, 0.7) 100%)',
                         backdropFilter: 'blur(24px)',
-                        border: message.role === "ai"
-                          ? isDark ? '1px solid rgba(255, 255, 255, 0.06)' : '1px solid rgba(0, 0, 0, 0.08)'
-                          : isDark ? '1px solid rgba(245, 197, 24, 0.2)' : '1px solid rgba(212, 169, 18, 0.3)',
-                        borderLeft: message.role === "ai" ? '2px solid #00D4FF' : undefined,
-                        boxShadow: message.role === "ai"
-                          ? isDark 
-                            ? '0 4px 20px rgba(0, 0, 0, 0.15), -4px 0 16px rgba(0, 212, 255, 0.08)'
-                            : '0 4px 20px rgba(0, 0, 0, 0.05), -4px 0 16px rgba(0, 212, 255, 0.1)'
-                          : isDark 
-                            ? '0 4px 20px rgba(245, 197, 24, 0.08)'
-                            : '0 4px 20px rgba(212, 169, 18, 0.12)',
+                        border: isDark ? '1px solid rgba(255, 255, 255, 0.06)' : '1px solid rgba(0, 0, 0, 0.08)',
+                        borderLeft: '2px solid #00D4FF',
                       }}
                     >
                       <p className="text-sm lg:text-base text-foreground leading-relaxed">
-                        {message.content}
+                        I&apos;m your coach. I have full context on {activeGoal ? `your goal "${activeGoal.title}"` : "your goals"} and every step you&apos;ve taken so far. Tell me what&apos;s on your mind — or pick one of the prompts below.
                       </p>
                     </div>
-                    <p
-                      className={`font-mono text-[10px] lg:text-[11px] text-muted-foreground mt-2 ${
-                        message.role === "user" ? "text-right" : "text-left"
-                      }`}
-                    >
-                      {message.timestamp}
-                    </p>
                   </div>
                 </motion.div>
-              ))}
+              )}
+
+              {messages.map((message, index) => {
+                const isUser = message.role === "user";
+                return (
+                  <motion.div
+                    key={message.message_id}
+                    initial={{
+                      opacity: 0,
+                      x: isUser ? 20 : -20,
+                      y: 10,
+                    }}
+                    animate={{ opacity: 1, x: 0, y: 0 }}
+                    transition={{ duration: 0.5, delay: Math.min(index * 0.05, 0.3), ease: [0.25, 0.4, 0.25, 1] }}
+                    className={`flex gap-3 lg:gap-4 ${isUser ? "justify-end" : "justify-start"}`}
+                    data-testid={`coach-page-msg-${message.role}`}
+                  >
+                    {!isUser && (
+                      <div className="flex-shrink-0 mt-1 hidden sm:block">
+                        <AnimatedOrb size={36} />
+                      </div>
+                    )}
+
+                    <div className={`max-w-[85%] sm:max-w-[80%] lg:max-w-[75%] ${isUser ? "order-first" : ""}`}>
+                      <div
+                        className={`rounded-2xl p-4 lg:p-5 ${isUser ? "rounded-br-md" : "rounded-bl-md"}`}
+                        style={{
+                          background: !isUser
+                            ? isDark
+                              ? 'linear-gradient(135deg, rgba(255, 255, 255, 0.05) 0%, rgba(255, 255, 255, 0.02) 100%)'
+                              : 'linear-gradient(135deg, rgba(255, 255, 255, 0.9) 0%, rgba(255, 255, 255, 0.7) 100%)'
+                            : isDark
+                              ? 'linear-gradient(135deg, rgba(245, 197, 24, 0.12) 0%, rgba(245, 197, 24, 0.04) 100%)'
+                              : 'linear-gradient(135deg, rgba(245, 197, 24, 0.2) 0%, rgba(245, 197, 24, 0.08) 100%)',
+                          backdropFilter: 'blur(24px)',
+                          border: !isUser
+                            ? isDark ? '1px solid rgba(255, 255, 255, 0.06)' : '1px solid rgba(0, 0, 0, 0.08)'
+                            : isDark ? '1px solid rgba(245, 197, 24, 0.2)' : '1px solid rgba(212, 169, 18, 0.3)',
+                          borderLeft: !isUser ? '2px solid #00D4FF' : undefined,
+                          boxShadow: !isUser
+                            ? isDark
+                              ? '0 4px 20px rgba(0, 0, 0, 0.15), -4px 0 16px rgba(0, 212, 255, 0.08)'
+                              : '0 4px 20px rgba(0, 0, 0, 0.05), -4px 0 16px rgba(0, 212, 255, 0.1)'
+                            : isDark
+                              ? '0 4px 20px rgba(245, 197, 24, 0.08)'
+                              : '0 4px 20px rgba(212, 169, 18, 0.12)',
+                        }}
+                      >
+                        <p className="text-sm lg:text-base text-foreground leading-relaxed whitespace-pre-wrap">
+                          {message.content}
+                        </p>
+                      </div>
+
+                      {/* Gold action chips under assistant messages that came with tool calls */}
+                      {!isUser && message.actions && message.actions.length > 0 && (
+                        <div className="mt-2 flex flex-wrap gap-2" data-testid={`coach-page-actions-${message.message_id}`}>
+                          {message.actions.map((action, i) => (
+                            <span
+                              key={`${message.message_id}-action-${i}`}
+                              data-testid={`coach-page-action-chip-${action.tool}`}
+                              className={`inline-flex items-center gap-1.5 rounded-full px-3 py-1 font-mono text-[11px] leading-none ${
+                                action.ok
+                                  ? isDark
+                                    ? "bg-[rgba(245,197,24,0.12)] border border-[rgba(245,197,24,0.3)] text-[#F5C518]"
+                                    : "bg-[rgba(212,169,18,0.12)] border border-[rgba(212,169,18,0.3)] text-[#D4A912]"
+                                  : isDark
+                                    ? "bg-[rgba(239,68,68,0.12)] border border-[rgba(239,68,68,0.3)] text-[#EF4444]"
+                                    : "bg-[rgba(239,68,68,0.08)] border border-[rgba(239,68,68,0.3)] text-[#B91C1C]"
+                              }`}
+                            >
+                              {action.ok ? "✓" : "⚠"} {action.summary}
+                            </span>
+                          ))}
+                        </div>
+                      )}
+
+                      <p
+                        className={`font-mono text-[10px] lg:text-[11px] text-muted-foreground mt-2 ${
+                          isUser ? "text-right" : "text-left"
+                        }`}
+                      >
+                        {formatTimestamp(message.created_at)}
+                      </p>
+                    </div>
+                  </motion.div>
+                );
+              })}
+
+              {/* Typing indicator while Claude is thinking */}
+              {sending && (
+                <motion.div
+                  initial={{ opacity: 0, x: -20 }}
+                  animate={{ opacity: 1, x: 0 }}
+                  transition={{ duration: 0.3 }}
+                  className="flex gap-3 lg:gap-4 justify-start"
+                  data-testid="coach-page-typing"
+                >
+                  <div className="flex-shrink-0 mt-1 hidden sm:block">
+                    <AnimatedOrb size={36} />
+                  </div>
+                  <div
+                    className="rounded-2xl rounded-bl-md px-4 py-3"
+                    style={{
+                      background: isDark
+                        ? 'linear-gradient(135deg, rgba(255, 255, 255, 0.05) 0%, rgba(255, 255, 255, 0.02) 100%)'
+                        : 'linear-gradient(135deg, rgba(255, 255, 255, 0.9) 0%, rgba(255, 255, 255, 0.7) 100%)',
+                      backdropFilter: 'blur(24px)',
+                      border: isDark ? '1px solid rgba(255, 255, 255, 0.06)' : '1px solid rgba(0, 0, 0, 0.08)',
+                      borderLeft: '2px solid #00D4FF',
+                    }}
+                  >
+                    <div className="flex items-center gap-1.5">
+                      <span className="w-1.5 h-1.5 rounded-full bg-[#00D4FF] animate-bounce" style={{ animationDelay: "0ms" }} />
+                      <span className="w-1.5 h-1.5 rounded-full bg-[#00D4FF] animate-bounce" style={{ animationDelay: "150ms" }} />
+                      <span className="w-1.5 h-1.5 rounded-full bg-[#00D4FF] animate-bounce" style={{ animationDelay: "300ms" }} />
+                    </div>
+                  </div>
+                </motion.div>
+              )}
+
               <div ref={messagesEndRef} />
             </div>
           </div>
@@ -242,8 +290,8 @@ export default function CoachChatPage() {
               {/* Quick Reply Chips */}
               <QuickReplyChips
                 chips={quickReplies}
-                onSelect={handleChipSelect}
-                visible={showChips}
+                onSelect={(chip) => void handleSend(chip)}
+                visible={showChips && !sending}
               />
 
               {/* Input Bar */}
@@ -258,26 +306,22 @@ export default function CoachChatPage() {
                   border: isDark ? '1px solid rgba(255, 255, 255, 0.08)' : '1px solid rgba(0, 0, 0, 0.1)',
                   boxShadow: isDark ? '0 4px 24px rgba(0, 0, 0, 0.2)' : '0 4px 24px rgba(0, 0, 0, 0.08)',
                 }}
+                data-testid="coach-page-input-form"
               >
-                <button
-                  type="button"
-                  className="p-3 text-[#00D4FF] hover:bg-[rgba(0,212,255,0.1)] rounded-xl transition-all duration-200"
-                  aria-label="Voice input"
-                >
-                  <Mic className="w-5 h-5" />
-                </button>
-
                 <input
                   type="text"
                   value={inputValue}
                   onChange={(e) => setInputValue(e.target.value)}
                   placeholder="Message your coach..."
-                  className={`flex-1 bg-transparent font-mono text-sm lg:text-base text-foreground outline-none py-2 ${isDark ? "placeholder:text-[#4A5568]" : "placeholder:text-[#9CA3AF]"}`}
+                  disabled={sending}
+                  data-testid="coach-page-input"
+                  className={`flex-1 bg-transparent font-mono text-sm lg:text-base text-foreground outline-none py-2 px-3 disabled:opacity-60 ${isDark ? "placeholder:text-[#4A5568]" : "placeholder:text-[#9CA3AF]"}`}
                 />
 
                 <button
                   type="submit"
-                  disabled={!inputValue.trim()}
+                  disabled={!inputValue.trim() || sending}
+                  data-testid="coach-page-send"
                   className="p-3 bg-[#F5C518] text-[#080B14] rounded-xl hover:bg-[#FFD633] disabled:opacity-40 disabled:cursor-not-allowed transition-all duration-200 pulse-glow shadow-[0_4px_16px_rgba(245,197,24,0.3)]"
                   aria-label="Send message"
                 >
@@ -300,6 +344,7 @@ export default function CoachChatPage() {
               ? 'linear-gradient(180deg, rgba(8, 11, 20, 0.6) 0%, rgba(8, 11, 20, 0.9) 100%)'
               : 'linear-gradient(180deg, rgba(248, 249, 250, 0.6) 0%, rgba(248, 249, 250, 0.9) 100%)',
           }}
+          data-testid="coach-page-context-panel"
         >
           <h3 className="font-sans text-sm font-semibold text-muted-foreground uppercase tracking-wider mb-5">
             Context
@@ -311,47 +356,82 @@ export default function CoachChatPage() {
               <Target className="w-4 h-4 text-[#F5C518]" />
               <span className="font-mono text-xs text-muted-foreground">Current Goal</span>
             </div>
-            <p className="font-sans font-semibold text-foreground">Start freelancing as a designer</p>
-            <p className="font-mono text-xs text-[#00D4FF] mt-1">Phase 2 — Building Portfolio</p>
+            {activeGoal ? (
+              <>
+                <p className="font-sans font-semibold text-foreground" data-testid="coach-page-goal-title">
+                  {activeGoal.title}
+                </p>
+                {currentPhaseLabel && (
+                  <p className="font-mono text-xs text-[#00D4FF] mt-1">
+                    {currentPhaseLabel}
+                  </p>
+                )}
+              </>
+            ) : (
+              <p className="font-mono text-xs text-muted-foreground leading-relaxed">
+                No active goal yet.{" "}
+                <Link href="/" className="text-[#F5C518] hover:underline">
+                  Create one
+                </Link>{" "}
+                to give your coach something to work on.
+              </p>
+            )}
           </div>
 
           {/* Today's Focus */}
-          <div className="glass-card p-4 mb-4">
-            <div className="flex items-center gap-3 mb-3">
-              <Calendar className="w-4 h-4 text-[#00D4FF]" />
-              <span className="font-mono text-xs text-muted-foreground">Today&apos;s Focus</span>
+          {todaysTasks.length > 0 && (
+            <div className="glass-card p-4 mb-4">
+              <div className="flex items-center gap-3 mb-3">
+                <Calendar className="w-4 h-4 text-[#00D4FF]" />
+                <span className="font-mono text-xs text-muted-foreground">Today&apos;s Focus</span>
+              </div>
+              <ul className="space-y-2" data-testid="coach-page-todays-focus">
+                {todaysTasks.slice(0, 4).map((task) => (
+                  <li key={task.id} className="flex items-center gap-2">
+                    <span
+                      className={`w-1.5 h-1.5 rounded-full ${
+                        task.completed
+                          ? "bg-[#22C55E]"
+                          : "bg-[#F5C518]"
+                      }`}
+                    />
+                    <span
+                      className={`font-mono text-sm ${
+                        task.completed
+                          ? "text-muted-foreground line-through"
+                          : "text-foreground/80"
+                      }`}
+                    >
+                      {task.title}
+                    </span>
+                  </li>
+                ))}
+              </ul>
             </div>
-            <ul className="space-y-2">
-              <li className="flex items-center gap-2">
-                <span className="w-1.5 h-1.5 rounded-full bg-[#F5C518]" />
-                <span className="font-mono text-sm text-foreground/80">Write your offer</span>
-              </li>
-              <li className="flex items-center gap-2">
-                <span className={`w-1.5 h-1.5 rounded-full ${isDark ? "bg-[rgba(255,255,255,0.3)]" : "bg-[rgba(0,0,0,0.2)]"}`} />
-                <span className="font-mono text-sm text-muted-foreground">Update portfolio</span>
-              </li>
-            </ul>
-          </div>
+          )}
 
           {/* Coach Info */}
           <div className="glass-card p-4">
             <div className="flex items-center gap-3 mb-3">
-              <Info className="w-4 h-4 text-[#9D4EDD]" />
+              <Sparkles className="w-4 h-4 text-[#9D4EDD]" />
               <span className="font-mono text-xs text-muted-foreground">About Your Coach</span>
             </div>
             <p className="font-mono text-xs text-muted-foreground leading-relaxed">
-              Your AI coach adapts to your communication style and progress patterns. It has full context of your goal history and past conversations.
+              Powered by Claude Sonnet 4.6. Your coach adapts to your communication style, remembers every conversation, and can act on your plan — completing tasks, rescheduling, logging mood, or saving notes for you.
             </p>
           </div>
 
-          <div className={`mt-6 pt-6 border-t ${isDark ? "border-[rgba(255,255,255,0.06)]" : "border-[rgba(0,0,0,0.06)]"}`}>
-            <Link 
-              href="/path" 
-              className="flex items-center justify-center gap-2 w-full py-3 rounded-xl font-mono text-sm text-[#F5C518] bg-[rgba(245,197,24,0.08)] hover:bg-[rgba(245,197,24,0.12)] transition-colors"
-            >
-              View Full Path
-            </Link>
-          </div>
+          {activeGoal && (
+            <div className={`mt-6 pt-6 border-t ${isDark ? "border-[rgba(255,255,255,0.06)]" : "border-[rgba(0,0,0,0.06)]"}`}>
+              <Link
+                href="/path"
+                className="flex items-center justify-center gap-2 w-full py-3 rounded-xl font-mono text-sm text-[#F5C518] bg-[rgba(245,197,24,0.08)] hover:bg-[rgba(245,197,24,0.12)] transition-colors"
+                data-testid="coach-page-view-path"
+              >
+                View Full Path
+              </Link>
+            </div>
+          )}
         </motion.aside>
       </div>
     </div>

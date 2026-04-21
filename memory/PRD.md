@@ -49,6 +49,23 @@ MongoDB: users, user_sessions, user_state, goals, paths, chat_messages,
          intake_messages, activity_events, notes, calendar_events
 ```
 
+### Session 7 — /coach full page wired
+- **`/coach` full-page route** now reads from the real `CoachContext`
+  (`/api/coach/history` + `/api/coach/chat`) instead of the hard-coded
+  `initialMessages` mockup. Typing indicator (three bouncing cyan dots),
+  gold/red action chips under assistant messages, live `activeGoal` +
+  `currentPhaseLabel` in the header and right-sidebar "Current Goal" /
+  "Today's Focus" cards. Input is disabled while `sending`. Empty-state
+  greeting references the user's active goal by title.
+- Env fix: bumped `pydantic>=2.12,<3` in `backend/requirements.txt` (was
+  `2.10.3` which broke against the shipped `pydantic_core 2.41.x` —
+  `ImportError: validate_core_schema`).
+- Preview fix: switched supervisor to serve the production build
+  (`yarn start` → `next start`, with `yarn build --webpack` as the build
+  step) because the dev webpack `eval-source-map` bundle was ballooning
+  to 12 MB and stalling React hydration behind the AuthGate Loading
+  screen. `yarn dev` still available for live hot-reload sessions.
+
 ## What's Been Implemented
 
 ### Sessions 1–4 — Foundation
